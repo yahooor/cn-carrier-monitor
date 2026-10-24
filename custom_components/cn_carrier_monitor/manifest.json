@@ -1,0 +1,15 @@
+{
+  "domain": "cn_carrier_monitor",
+  "name": "中国运营商话费监控",
+  "codeowners": ["@hlhk2017"],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/hlhk2017/cn-carrier-monitor",
+  "integration_type": "hub",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/hlhk2017/cn-carrier-monitor/issues",
+  "loggers": ["custom_components.cn_carrier_monitor"],
+  "requirements": [],
+  "single_config_entry": false,
+  "version": "1.0.0"
+}

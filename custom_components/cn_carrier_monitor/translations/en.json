@@ -1,0 +1,181 @@
+{
+  "title": "China Carrier Monitor",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Select carrier",
+        "description": "Each account is one config entry; add the integration again for more numbers.",
+        "data": {
+          "carrier": "Carrier"
+        }
+      },
+      "telecom": {
+        "title": "China Telecom",
+        "description": "Sign in with the Telecom service password (the query password of the web/app portal).",
+        "data": {
+          "phone": "Phone number",
+          "password": "Service password",
+          "device_id": "Trusted device ID (optional)",
+          "interval": "Refresh interval (minutes)"
+        }
+      },
+      "unicom_mode": {
+        "title": "China Unicom",
+        "description": "Choose a login method.",
+        "data": {
+          "mode": "Login method"
+        }
+      },
+      "unicom": {
+        "title": "China Unicom",
+        "description": "Sign in with the Unicom service password.",
+        "data": {
+          "phone": "Phone number",
+          "password": "Service password",
+          "interval": "Refresh interval (minutes)"
+        }
+      },
+      "unicom_openid": {
+        "title": "China Unicom (openid)",
+        "description": "Paste the openid captured from the Unicom WeChat mini program. Leave the phone empty to auto-detect.",
+        "data": {
+          "openid": "openid",
+          "phone": "Phone number (optional)",
+          "interval": "Refresh interval (minutes)"
+        }
+      },
+      "mobile_mode": {
+        "title": "China Mobile",
+        "description": "Choose a login method.",
+        "data": {
+          "mode": "Login method"
+        }
+      },
+      "mobile_sms": {
+        "title": "China Mobile (SMS)",
+        "description": "Enter the phone number; a verification code will be sent on submit.",
+        "data": {
+          "phone": "Phone number"
+        }
+      },
+      "mobile_sms_code": {
+        "title": "China Mobile (SMS)",
+        "description": "Enter the SMS verification code.",
+        "data": {
+          "code": "SMS code",
+          "interval": "Refresh interval (minutes)"
+        }
+      },
+      "mobile_password": {
+        "title": "China Mobile (password)",
+        "description": "Sign in with the China Mobile service password.",
+        "data": {
+          "phone": "Phone number",
+          "password": "Service password",
+          "interval": "Refresh interval (minutes)"
+        }
+      },
+      "mobile_cookie": {
+        "title": "China Mobile (Cookie)",
+        "description": "Log in to wx.10086.cn in a browser and paste the Cookie header.",
+        "data": {
+          "phone": "Phone number",
+          "cookies": "Cookie",
+          "interval": "Refresh interval (minutes)"
+        }
+      },
+      "broadnet": {
+        "title": "China Broadnet",
+        "description": "Log in at www.10099.com.cn in a browser, then copy the qryUserRes request as cURL and paste it below.",
+        "data": {
+          "phone": "Phone number (optional)",
+          "request_source": "cURL or request URL",
+          "cookies": "Cookie (leave empty if included in cURL)",
+          "interval": "Refresh interval (minutes)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to the carrier server",
+      "telecom_need_captcha": "CAPTCHA required, retry later or set a trusted device ID",
+      "telecom_device_untrusted": "Device not trusted; sign in via the official app once or set a trusted device ID",
+      "telecom_too_frequent": "Too many attempts, retry later",
+      "telecom_account_locked": "Account locked, unlock via official channels",
+      "telecom_password_locked": "Service password locked, reset via official channels",
+      "telecom_invalid_credentials": "Wrong phone number or service password",
+      "unicom_invalid_credentials": "Wrong phone number or service password",
+      "unicom_openid_invalid": "openid is invalid or expired",
+      "unicom_session_expired": "Unicom session expired",
+      "unicom_session_mismatch": "Session phone mismatch, aborted",
+      "mobile_code_invalid": "Wrong or expired SMS code",
+      "mobile_captcha_required": "Risk-control CAPTCHA triggered, retry later or use password login",
+      "mobile_account_locked": "Account locked, unlock via official channels",
+      "mobile_password_error": "Wrong phone number or service password",
+      "mobile_sms_send_failed": "Failed to send the SMS code, retry later or use another method",
+      "mobile_session_expired": "Login session expired, please sign in again",
+      "broadnet_import_invalid": "Could not parse the paste; expected cURL or a full URL",
+      "broadnet_session_expired": "Broadnet session expired, log in again and copy a fresh request",
+      "broadnet_query_failed": "Broadnet query failed, verify the session and retry"
+    },
+    "abort": {
+      "already_configured": "This account is already configured",
+      "reauth_successful": "Re-authentication successful"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Refresh settings",
+        "data": {
+          "interval": "Refresh interval (minutes)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "balance": {
+        "name": "Balance"
+      },
+      "month_cost": {
+        "name": "Monthly cost"
+      },
+      "plan_name": {
+        "name": "Plan name"
+      },
+      "points": {
+        "name": "Points"
+      },
+      "flow_general_remain": {
+        "name": "General data remaining"
+      },
+      "flow_general_used": {
+        "name": "General data used"
+      },
+      "flow_directed_remain": {
+        "name": "Directed data remaining"
+      },
+      "flow_total_remain": {
+        "name": "Total data remaining"
+      },
+      "voice_remain": {
+        "name": "Voice remaining"
+      },
+      "sms_remain": {
+        "name": "SMS remaining"
+      }
+    }
+  },
+  "services": {
+    "refresh": {
+      "name": "Refresh now",
+      "description": "Trigger an immediate data refresh.",
+      "fields": {
+        "entry_id": {
+          "name": "Entry ID",
+          "description": "Leave empty to refresh all accounts."
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,181 @@
+{
+  "title": "中国运营商话费监控",
+  "config": {
+    "step": {
+      "user": {
+        "title": "选择运营商",
+        "description": "每个账号创建一个配置条目，可重复添加多个号码。",
+        "data": {
+          "carrier": "运营商"
+        }
+      },
+      "telecom": {
+        "title": "中国电信",
+        "description": "使用电信服务密码登录（网上营业厅/掌上营业厅的查询密码，非通话密码）。",
+        "data": {
+          "phone": "手机号",
+          "password": "服务密码",
+          "device_id": "设备信任 ID（可选，遇到设备绑定提示时填写）",
+          "interval": "刷新间隔（分钟）"
+        }
+      },
+      "unicom_mode": {
+        "title": "中国联通",
+        "description": "选择登录方式。",
+        "data": {
+          "mode": "登录方式"
+        }
+      },
+      "unicom": {
+        "title": "中国联通",
+        "description": "使用联通服务密码登录（中国联通 App 的服务密码）。",
+        "data": {
+          "phone": "手机号",
+          "password": "服务密码",
+          "interval": "刷新间隔（分钟）"
+        }
+      },
+      "unicom_openid": {
+        "title": "中国联通（openid）",
+        "description": "从联通微信小程序抓取 openid 后填入（参考 README 抓包指引）。手机号留空可自动识别。",
+        "data": {
+          "openid": "openid",
+          "phone": "手机号（可选，自动识别）",
+          "interval": "刷新间隔（分钟）"
+        }
+      },
+      "mobile_mode": {
+        "title": "中国移动",
+        "description": "选择登录方式。",
+        "data": {
+          "mode": "登录方式"
+        }
+      },
+      "mobile_sms": {
+        "title": "中国移动（短信登录）",
+        "description": "输入手机号，点提交后向该号码发送短信验证码。",
+        "data": {
+          "phone": "手机号"
+        }
+      },
+      "mobile_sms_code": {
+        "title": "中国移动（短信登录）",
+        "description": "请输入收到的短信验证码。",
+        "data": {
+          "code": "短信验证码",
+          "interval": "刷新间隔（分钟）"
+        }
+      },
+      "mobile_password": {
+        "title": "中国移动（服务密码）",
+        "description": "使用移动服务密码登录（网上营业厅的查询密码）。",
+        "data": {
+          "phone": "手机号",
+          "password": "服务密码",
+          "interval": "刷新间隔（分钟）"
+        }
+      },
+      "mobile_cookie": {
+        "title": "中国移动（Cookie 导入）",
+        "description": "在浏览器登录 wx.10086.cn 后，复制请求中的 Cookie 头粘贴到这里。",
+        "data": {
+          "phone": "手机号",
+          "cookies": "Cookie",
+          "interval": "刷新间隔（分钟）"
+        }
+      },
+      "broadnet": {
+        "title": "中国广电",
+        "description": "在浏览器登录 www.10099.com.cn 后，在个人中心的 qryUserRes 请求上「以 cURL 格式复制」，粘贴到下面（也可分别填 URL 和 Cookie）。",
+        "data": {
+          "phone": "手机号（可选）",
+          "request_source": "cURL 或请求 URL",
+          "cookies": "Cookie（cURL 中已包含则留空）",
+          "interval": "刷新间隔（分钟）"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "连接运营商服务器失败，请稍后重试",
+      "telecom_need_captcha": "电信登录需要图形验证码，请稍后重试或填写设备信任 ID",
+      "telecom_device_untrusted": "设备未被信任，请先在官方 App 登录一次或填写设备信任 ID",
+      "telecom_too_frequent": "登录过于频繁，请稍后再试",
+      "telecom_account_locked": "账号被锁定，请通过官方渠道解锁",
+      "telecom_password_locked": "服务密码被锁定，请通过官方渠道重置",
+      "telecom_invalid_credentials": "手机号或服务密码错误",
+      "unicom_invalid_credentials": "手机号或服务密码错误",
+      "unicom_openid_invalid": "openid 无效或已失效，请重新抓取",
+      "unicom_session_expired": "联通会话已失效",
+      "unicom_session_mismatch": "联通会话与填写的号码不一致，已中止",
+      "mobile_code_invalid": "短信验证码错误或已过期，请重新获取",
+      "mobile_captcha_required": "触发风控图形验证码，请稍后重试或改用服务密码登录",
+      "mobile_account_locked": "账号被锁定，请通过官方渠道解锁",
+      "mobile_password_error": "手机号或服务密码错误",
+      "mobile_sms_send_failed": "验证码发送失败，请稍后重试或改用其他登录方式",
+      "mobile_session_expired": "登录会话已失效，请重新登录",
+      "broadnet_import_invalid": "无法解析粘贴内容，请确认复制的是 cURL 或完整 URL",
+      "broadnet_session_expired": "广电会话已失效，请重新登录并复制新请求",
+      "broadnet_query_failed": "广电查询失败，请确认会话有效后重试"
+    },
+    "abort": {
+      "already_configured": "该账号已配置",
+      "reauth_successful": "重新登录成功"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "刷新设置",
+        "data": {
+          "interval": "刷新间隔（分钟）"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "balance": {
+        "name": "话费余额"
+      },
+      "month_cost": {
+        "name": "本月消费"
+      },
+      "plan_name": {
+        "name": "套餐名称"
+      },
+      "points": {
+        "name": "积分"
+      },
+      "flow_general_remain": {
+        "name": "通用流量剩余"
+      },
+      "flow_general_used": {
+        "name": "通用流量已用"
+      },
+      "flow_directed_remain": {
+        "name": "定向流量剩余"
+      },
+      "flow_total_remain": {
+        "name": "总流量剩余"
+      },
+      "voice_remain": {
+        "name": "语音剩余"
+      },
+      "sms_remain": {
+        "name": "短信剩余"
+      }
+    }
+  },
+  "services": {
+    "refresh": {
+      "name": "立即刷新",
+      "description": "手动触发一次话费/套餐数据刷新。",
+      "fields": {
+        "entry_id": {
+          "name": "配置条目 ID",
+          "description": "留空刷新全部账号。"
+        }
+      }
+    }
+  }
+}

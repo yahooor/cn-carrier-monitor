@@ -1,0 +1,523 @@
+"""China Unicom (中国联通) client.
+
+两条鉴权链路：
+- password: 手机营业厅 App 协议。POST m.client.10010.com/mobileService/login.htm
+  （RSA-PKCS1v15(值+6位随机数字)，公钥硬编码于联通 App），返回 token_online 与
+  会话 Cookie；查询接口仅依赖 Cookie；会话失效(999998/999999)时用
+  onLine.htm(token_online+appId) 续期。
+- openid: 微信小程序链路（mina.10010.com），从既有集成移植，作为无服务密码时
+  的兜底。
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import random
+import re
+import time
+from typing import Any
+
+import aiohttp
+
+from ..const import (
+    UNICOM_BALANCE_URL,
+    UNICOM_LOGIN_URL,
+    UNICOM_MINI_APPID,
+    UNICOM_MINI_BALANCE_BROADCAST,
+    UNICOM_MINI_BASE,
+    UNICOM_MINI_FLOW_URL,
+    UNICOM_MINI_GET_TICKET,
+    UNICOM_MINI_GET_TOKEN,
+    UNICOM_MINI_GOODS,
+    UNICOM_MINI_OVERVIEW,
+    UNICOM_MINI_SERVICE_ENTRANCE,
+    UNICOM_ONLINE_URL,
+    UNICOM_PACKAGE_URL,
+    UNICOM_UA,
+    UNICOM_VERSION,
+)
+from .base import (
+    CarrierAuthError,
+    CarrierClient,
+    CarrierError,
+    finish,
+    to_float,
+    usage_block,
+)
+from .crypto import rsa_encrypt_b64
+
+_LOGGER = logging.getLogger(__name__)
+
+# 联通 App 登录 RSA 公钥（SPKI/DER，base64）
+UNICOM_LOGIN_PUBKEY = (
+    "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDc+CZK9bBA9IU+gZUOc6FUGu7yO9WpTNB0PzmgFBh96Mg1WrovD1oqZ+eIF4LjvxKXGOdI79JRdve9NPhQo07+uqGQgE4imwNnRx7PFtCRryiIEcUoavuNtuRVoBAm6qdB0SrctgaqGfLgKvZHOnwTjyNqjBUxzMeQlEC2czEMSwIDAQAB"
+)
+
+# 小程序接口 RSA 公钥（openid 字段必须 RSA 加密）
+UNICOM_MINI_PUBKEY = (
+    "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA7vCN/AU3QMTuRcQoOsJP1fo6LbU++DxS1QQbgYrkmatPbb7Hactr7O"
+    "cTLWYa/ZoOUNuYeCFQtrJ8P8YIDASn2wjIwFteCIdOeWMUcKahdaNvqiS40epA2jFSiC/4hwZXDFNlPtrWsllcCtVFPV1bEGh3"
+    "rYKQNI/ZZQVMKzuccSV0BwIC/EjSwaPY1p7x7ACki5V3VPwBut2xkmVDsJDKrgwBDeevpZHKKdHJKMUV8S9NbO7Mq4MbprnTMw"
+    "Gt69no7KP2P38Mh+FMbMBIaIolggjjudziyWE9HdaJQiY9cWb9PFJzwY3/nxDHU5nBOeTI/FEo3sWrKWLEdFILIlxGmQIDAQAB"
+)
+
+_MINI_REFERER = f"https://servicewechat.com/{UNICOM_MINI_APPID}/494/page-frame.html"
+_MINI_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36 MicroMessenger/7.0"
+)
+MINI_HEADERS_JSON = {
+    "Content-Type": "application/json",
+    "User-Agent": _MINI_UA,
+    "xweb_xhr": "1",
+    "X-Tingyun": "c=M|4Nl_NnGbjwY",
+    "Accept": "*/*",
+    "Referer": _MINI_REFERER,
+}
+MINI_HEADERS_FORM = {
+    "Content-Type": "application/x-www-form-urlencoded",
+    "User-Agent": _MINI_UA,
+    "xweb_xhr": "1",
+    "Accept": "application/json, text/plain, */*",
+    "Referer": _MINI_REFERER,
+}
+
+APPID_TEMPLATE = (
+    "{d}f{d}af{d}{d}ad{d}912d306b5053abf90c7ebbb695887bc"
+    "870ae0706d573c348539c26c5c0a878641fcc0d3e90acb9be1e6ef858a"
+    "59af546f3c826988332376b7d18c8ea2398ee3a9c3db947e2471d32a49{d}{d}"
+)
+
+
+def _rand_digit() -> str:
+    return str(random.randint(0, 9))
+
+
+def generate_app_id() -> str:
+    """Device-stable appId in the format observed in the official app."""
+    return APPID_TEMPLATE.format(d=_rand_digit())
+
+
+def _rsa_login(value: str) -> str:
+    """App login RSA: value + 6 random digits, PKCS1v15, base64."""
+    suffix = "".join(_rand_digit() for _ in range(6))
+    return rsa_encrypt_b64(UNICOM_LOGIN_PUBKEY, value + suffix)
+
+
+def _parse_flow_detail(detail: dict[str, Any]) -> dict[str, Any]:
+    """微厅余量明细 → 通用字段（流量 MB→GB）。"""
+    blocks: dict[str, dict] = {}
+    for item in detail.get("resources") or []:
+        if isinstance(item, dict):
+            blocks[str(item.get("type", "")).lower()] = item
+
+    def _num(value: Any) -> float | None:
+        return to_float(value)
+
+    def _mb_to_gb(value: Any) -> float | None:
+        num = _num(value)
+        return round(num / 1024, 2) if num is not None else None
+
+    flow_blk = blocks.get("flow") or {}
+    voice_blk = blocks.get("voice") or {}
+    sms_blk = blocks.get("smslist") or {}
+
+    flow_used = _mb_to_gb(flow_blk.get("userResource"))
+    flow_remain = _mb_to_gb(flow_blk.get("remainResource"))
+    voice_used, voice_remain = _num(voice_blk.get("userResource")), _num(voice_blk.get("remainResource"))
+    sms_used, sms_remain = _num(sms_blk.get("userResource")), _num(sms_blk.get("remainResource"))
+
+    type_map = {"1": "通用流量", "2": "定向流量", "3": "闲时/区域流量", "4": "国际漫游"}
+    sums: dict[str, dict[str, Any]] = {}
+    for item in detail.get("fresSumList") or []:
+        if not isinstance(item, dict):
+            continue
+        label = type_map.get(str(item.get("flowtype")))
+        if not label:
+            continue
+        used = _mb_to_gb(item.get("xusedvalue"))
+        remain = _mb_to_gb(item.get("xcanusevalue"))
+        if used is None and remain is None:
+            continue
+        sums[label] = {"used": used, "remain": remain, "total": round((used or 0) + (remain or 0), 2)}
+
+    return {
+        "plan_name": detail.get("packageName"),
+        "flow_general": (
+            usage_block(flow_used, round((flow_used or 0) + (flow_remain or 0), 2), flow_remain)
+            if flow_used is not None or flow_remain is not None
+            else None
+        ),
+        "flow_sums": sums,
+        "voice": (
+            usage_block(voice_used, round((voice_used or 0) + (voice_remain or 0), 1), voice_remain)
+            if voice_used is not None or voice_remain is not None
+            else None
+        ),
+        "sms": (
+            usage_block(sms_used, round((sms_used or 0) + (sms_remain or 0), 1), sms_remain)
+            if sms_used is not None or sms_remain is not None
+            else None
+        ),
+    }
+
+
+def _parse_ocs_usage(payload: dict[str, Any]) -> dict[str, Any]:
+    """queryOcsPackageFlowLeftContent 响应解析（App Cookie 链路）。"""
+    parsed: dict[str, Any] = {}
+
+    def collect(details: Any) -> tuple[list, list, list]:
+        data_items: list = []
+        voice_items: list = []
+        sms_items: list = []
+        if not isinstance(details, list):
+            return data_items, voice_items, sms_items
+        for item in details:
+            if not isinstance(item, dict):
+                continue
+            elem = item.get("elemType")
+            if elem == "3":
+                data_items.append(item)
+            elif elem == "1":
+                voice_items.append(item)
+            elif elem == "2":
+                sms_items.append(item)
+        return data_items, voice_items, sms_items
+
+    all_data: list = []
+    all_voice: list = []
+    all_sms: list = []
+    for source in ("unshared", "shareData", "resources"):
+        node = payload.get(source)
+        if isinstance(node, dict):
+            got = collect(node.get("details"))
+            all_data += got[0]
+            all_voice += got[1]
+            all_sms += got[2]
+        elif isinstance(node, list):
+            for group in node:
+                if isinstance(group, dict):
+                    got = collect(group.get("details"))
+                    all_data += got[0]
+                    all_voice += got[1]
+                    all_sms += got[2]
+
+    def flow_row(item: dict) -> dict[str, Any]:
+        used, remain = to_float(item.get("use")), to_float(item.get("remain"))
+        total = to_float(item.get("total"))
+        if total is None and used is not None and remain is not None:
+            total = round(used + remain, 2)
+        return {
+            "name": item.get("addUpItemName"),
+            "used": round(used / 1024, 2) if used is not None else None,
+            "remain": round(remain / 1024, 2) if remain is not None else None,
+            "total": round(total / 1024, 2) if total is not None else None,
+            "flow_type": item.get("flowType"),
+        }
+
+    if all_data:
+        parsed["flow_items"] = [flow_row(i) for i in all_data]
+        general = [i for i in all_data if str(i.get("flowType") or "1") == "1"]
+        directed = [i for i in all_data if str(i.get("flowType") or "") == "2"]
+        for key, items in (("flow_general", general), ("flow_directed", directed)):
+            used = sum(to_float(i.get("use")) or 0 for i in items)
+            remain = sum(to_float(i.get("remain")) or 0 for i in items)
+            if used or remain:
+                parsed[key] = usage_block(
+                    round(used / 1024, 2), round((used + remain) / 1024, 2), round(remain / 1024, 2)
+                )
+
+    for key, items in (("voice", all_voice), ("sms", all_sms)):
+        if items:
+            used = sum(to_float(i.get("use")) or 0 for i in items)
+            total = sum(to_float(i.get("total")) or 0 for i in items)
+            remain = sum(to_float(i.get("remain")) or 0 for i in items)
+            parsed[key] = usage_block(used, total, remain)
+    return parsed
+
+
+class UnicomClient(CarrierClient):
+    """联通客户端：password 模式（App 协议）。"""
+
+    carrier = "unicom"
+
+    def __init__(self, session: aiohttp.ClientSession, data: dict[str, Any]) -> None:
+        super().__init__(session, data)
+        self._password = str(data.get("password") or "")
+        self._app_id = str(data.get("app_id") or "") or generate_app_id()
+        self._token_online = str(data.get("token") or "")
+
+    # ------------------------------------------------------------------ login
+
+    async def async_login(self, phone: str, password: str) -> dict[str, Any]:
+        """login.htm 服务密码登录，返回可持久化的凭证。"""
+        payload = {
+            "version": UNICOM_VERSION,
+            "mobile": _rsa_login(phone),
+            "reqtime": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "deviceModel": "Android",
+            "netWay": "Wifi",
+            "isR4": "0",
+            "password": _rsa_login(password),
+            "appId": self._app_id,
+        }
+        status, body = await self._request(
+            "POST",
+            UNICOM_LOGIN_URL,
+            form=payload,
+            headers={
+                "User-Agent": UNICOM_UA,
+                "Referer": "https://m.client.10010.com/",
+            },
+        )
+        if status != 200:
+            raise CarrierError(f"联通登录接口 HTTP {status}")
+        try:
+            result = json.loads(body)
+        except ValueError as err:
+            raise CarrierError(f"联通登录响应异常: {body[:120]}") from err
+        code = str(result.get("code") or "")
+        if code not in ("0", "0000"):
+            if code in ("4102", "4103", "3102"):
+                raise CarrierAuthError("unicom_invalid_credentials")
+            raise CarrierError(f"联通登录失败: {result.get('desc') or code}")
+        token = result.get("token_online")
+        if not token:
+            raise CarrierError("联通登录成功但未返回 token_online")
+        return {
+            "phone": phone,
+            "password": password,
+            "app_id": self._app_id,
+            "token": token,
+        }
+
+    # ------------------------------------------------------------------ renew
+
+    async def _async_renew(self) -> bool:
+        """onLine.htm 用 token_online 换新会话 Cookie。"""
+        if not self._token_online:
+            return False
+        form = {
+            "token_online": self._token_online,
+            "appId": self._app_id,
+            "version": UNICOM_VERSION,
+            "deviceModel": "Android",
+        }
+        status, body = await self._request(
+            "POST", UNICOM_ONLINE_URL, form=form, headers={"User-Agent": UNICOM_UA}
+        )
+        if status != 200:
+            return False
+        try:
+            result = json.loads(body)
+        except ValueError:
+            return False
+        if str(result.get("code") or "") != "0":
+            return False
+        if str(result.get("desmobile") or "") not in ("", self.phone):
+            raise CarrierAuthError("unicom_session_mismatch")
+        new_token = result.get("token_online")
+        if new_token:
+            self._token_online = str(new_token)
+        return True
+
+    # ------------------------------------------------------------------ query
+
+    async def _query_url(self, url: str) -> dict[str, Any]:
+        status, body = await self._request(
+            "POST", url, form={}, headers={"User-Agent": UNICOM_UA}
+        )
+        text = body.strip()
+        if text in ("999998", "999999") or status in (401, 403):
+            raise CarrierAuthError("unicom_session_expired")
+        try:
+            return json.loads(body)
+        except ValueError as err:
+            raise CarrierError(f"联通查询响应异常: {body[:120]}") from err
+
+    async def async_fetch(self) -> dict[str, Any]:
+        data = empty_data("unicom", self.phone)
+        if not self._password:
+            raise CarrierAuthError("缺少服务密码")
+        if not self._token_online:
+            creds = await self.async_login(self.phone, self._password)
+            self._token_online = creds["token"]
+
+        try:
+            package = await self._query_url(UNICOM_PACKAGE_URL)
+        except CarrierAuthError:
+            if not await self._async_renew():
+                raise
+            package = await self._query_url(UNICOM_PACKAGE_URL)
+
+        usage = _parse_ocs_usage(package)
+        for key, value in usage.items():
+            if value:
+                data[key] = value
+
+        try:
+            balance_payload = await self._query_url(UNICOM_BALANCE_URL)
+            balance_data = balance_payload.get("data") if isinstance(balance_payload.get("data"), dict) else {}
+            if balance_data:
+                data["balance"] = to_float(
+                    balance_data.get("canusefeecustNew") or balance_data.get("canusefeecust")
+                )
+                data["month_cost"] = to_float(
+                    balance_data.get("totalrealfee") or balance_data.get("realfeecustnew")
+                )
+                if balance_data.get("packageName"):
+                    data["plan_name"] = balance_data.get("packageName")
+        except CarrierError as err:
+            _LOGGER.debug("联通余额查询失败（忽略）: %s", err)
+
+        if data["plan_name"] is None:
+            data["plan_name"] = package.get("packageName") or None
+        return finish(data)
+
+    def export_credentials(self) -> dict[str, Any]:
+        return {"token": self._token_online, "app_id": self._app_id}
+
+
+class UnicomOpenIdClient(CarrierClient):
+    """联通客户端：openid 模式（微信小程序链路，移植自 unicom-mini-ha）。"""
+
+    carrier = "unicom"
+
+    def __init__(self, session: aiohttp.ClientSession, data: dict[str, Any]) -> None:
+        super().__init__(session, data)
+        self._openid = str(data.get("openid") or "")
+
+    def _enc(self, text: str) -> str:
+        return rsa_encrypt_b64(UNICOM_MINI_PUBKEY, text)
+
+    async def _mini_post(self, url: str, payload: dict) -> dict[str, Any]:
+        status, body = await self._request(
+            "POST", url, json_body=payload, headers=MINI_HEADERS_JSON
+        )
+        try:
+            result = json.loads(body)
+        except ValueError as err:
+            raise CarrierError(f"小程序接口响应异常: {body[:120]}") from err
+        if status != 200:
+            raise CarrierError(f"小程序接口 HTTP {status}")
+        return result
+
+    async def _async_microhall_cookies(self, ticket: str) -> dict[str, str]:
+        cookies: dict[str, str] = {}
+        url: str | None = UNICOM_MINI_SERVICE_ENTRANCE
+        params: dict[str, str] | None = {
+            "ticket": ticket,
+            "servicecode": "YH10005",
+            "ticketChannel": "XCXYLCXYY",
+        }
+        for _ in range(4):
+            if not url:
+                break
+            try:
+                async with self._session.get(
+                    url,
+                    params=params,
+                    headers=MINI_HEADERS_FORM,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                    allow_redirects=False,
+                ) as resp:
+                    for key, morsel in resp.cookies.items():
+                        cookies[key] = morsel.value
+                    location = resp.headers.get("Location")
+                    await resp.read()
+                    if resp.status in (301, 302, 303, 307, 308) and location:
+                        url, params = location, None
+                        continue
+                    break
+            except aiohttp.ClientError as err:
+                _LOGGER.debug("微厅会话获取失败: %s", err)
+                break
+        return cookies
+
+    async def _async_mxx_flow(self, ticket: str, cookie_header: str) -> dict[str, Any]:
+        form = {
+            "duanlianjieabc": "", "channelCode": "", "serviceType": "", "saleChannel": "",
+            "externalSources": "", "contactCode": "", "ticket": ticket, "ticketPhone": "wx",
+            "ticketChannel": "XCXYLCXYY", "language": "chinese",
+        }
+        headers = dict(MINI_HEADERS_FORM)
+        if cookie_header:
+            headers["Cookie"] = cookie_header
+        status, body = await self._request(
+            "POST", UNICOM_MINI_FLOW_URL, form=form, headers=headers
+        )
+        return json.loads(body)
+
+    async def async_fetch(self) -> dict[str, Any]:
+        import urllib.parse
+
+        data = empty_data("unicom", self.phone)
+        token_result = await self._mini_post(
+            UNICOM_MINI_GET_TOKEN,
+            {"openid": self._enc(self._openid), "channel": "wxmini"},
+        )
+        if token_result.get("code") != "0000":
+            raise CarrierAuthError("unicom_openid_invalid")
+        token = urllib.parse.unquote(str(token_result.get("data") or ""))
+        blob = self._enc(token + self._openid)
+
+        overview_raw = await self._mini_post(
+            UNICOM_MINI_OVERVIEW, {"openid": blob, "channel": "wxmini"}
+        )
+        if overview_raw.get("code") != "0000":
+            raise CarrierAuthError("unicom_openid_invalid")
+        overview = overview_raw.get("data") or {}
+        fee_res = overview.get("feeResource") or {}
+        flow_res = overview.get("flowResource") or {}
+        voice_res = overview.get("voiceResource") or {}
+        data["balance"] = to_float(fee_res.get("feePersent"))
+        data["extra"]["data_remaining"] = to_float(flow_res.get("flowPersent"))
+        data["extra"]["voice_remaining"] = to_float(voice_res.get("voicePersent"))
+
+        try:
+            goods = await self._mini_post(
+                UNICOM_MINI_GOODS, {"openid": blob, "channel": "wxmini"}
+            )
+            rows = (goods.get("data") or {}).get("res") or []
+            if rows and isinstance(rows[0], dict) and rows[0].get("mainNumber"):
+                data["phone"] = rows[0]["mainNumber"]
+        except (CarrierError, TypeError, ValueError, IndexError) as err:
+            _LOGGER.debug("queryGoodsList 失败（忽略）: %s", err)
+
+        try:
+            bc = await self._mini_post(
+                UNICOM_MINI_BALANCE_BROADCAST, {"openid": blob, "channel": "wxmini"}
+            )
+            rows = bc.get("data") or []
+            if rows and isinstance(rows[0], dict):
+                data["month_cost"] = to_float(rows[0].get("REAL_FEE_CUST"))
+                if data["balance"] is None:
+                    data["balance"] = to_float(rows[0].get("CANUSE_FEE_CUST"))
+        except (CarrierError, TypeError, ValueError, IndexError) as err:
+            _LOGGER.debug("余额播报失败（忽略）: %s", err)
+
+        # 微厅余量明细（失败不影响基础数据）
+        try:
+            t = await self._mini_post(
+                UNICOM_MINI_GET_TICKET, {"openId": blob, "channel": "wxmini"}
+            )
+            if t.get("code") == "0000":
+                ticket = str(t.get("data") or "")
+                cookies = await self._async_microhall_cookies(ticket)
+                if cookies.get("microHallUser"):
+                    header = "; ".join(f"{k}={v}" for k, v in cookies.items())
+                    detail = await self._async_mxx_flow(ticket, header)
+                    parsed = _parse_flow_detail(detail)
+                    data["plan_name"] = parsed.get("plan_name") or data["plan_name"]
+                    for key in ("flow_general", "voice", "sms"):
+                        if parsed.get(key):
+                            data[key] = parsed[key]
+                    sums = parsed.get("flow_sums") or {}
+                    if sums.get("定向流量") and not data["flow_directed"]:
+                        data["flow_directed"] = sums["定向流量"]
+                    elif sums.get("通用流量") and not data["flow_general"]:
+                        data["flow_general"] = sums["通用流量"]
+        except (CarrierError, ValueError, TypeError) as err:
+            _LOGGER.info("微厅余量明细失败（不影响基础数据）: %s", err)
+        return finish(data)
