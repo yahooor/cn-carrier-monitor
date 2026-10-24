@@ -5,7 +5,9 @@
     "@hlhk2017"
   ],
   "config_flow": true,
-  "dependencies": [],
+  "dependencies": [
+    "persistent_notification"
+  ],
   "documentation": "https://github.com/hlhk2017/cn-carrier-monitor",
   "integration_type": "hub",
   "iot_class": "cloud_polling",

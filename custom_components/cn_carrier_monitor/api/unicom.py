@@ -41,6 +41,7 @@ from ..const import (
 from .base import (
     CarrierAuthError,
     CarrierClient,
+    empty_data,
     CarrierError,
     finish,
     to_float,

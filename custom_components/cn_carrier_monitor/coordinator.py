@@ -48,6 +48,13 @@ class CarrierDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             data = await self.client.async_fetch()
         except CarrierAuthError as err:
+            _LOGGER.warning(
+                "%s 认证失败(%s), supports_sms_relogin=%s",
+                self.entry.title, err, self.supports_sms_relogin,
+            )
+            if self.supports_sms_relogin:
+                # 短信模式：自动下发验证码，等 webhook/手动回填后自动恢复
+                self.hass.async_create_task(self._async_safe_send_relogin_sms())
             raise ConfigEntryAuthFailed(str(err)) from err
         except CarrierError as err:
             raise UpdateFailed(str(err)) from err
@@ -74,6 +81,89 @@ class CarrierDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         _LOGGER.debug("更新账号凭证（滑动续期）: %s", sorted(updates.keys()))
         new_data = {**self.entry.data, **updates}
         self.hass.config_entries.async_update_entry(self.entry, data=new_data)
+
+
+    # ------------------------------------------------------------------ SMS 自动重登
+
+    SMS_AUTH_MODES = {"telecom": "sms", "unicom": "sms"}
+
+    @property
+    def supports_sms_relogin(self) -> bool:
+        return (
+            self.carrier in self.SMS_AUTH_MODES
+            and self.entry.data.get("auth_mode") == self.SMS_AUTH_MODES[self.carrier]
+        )
+
+    async def _async_safe_send_relogin_sms(self) -> None:
+        try:
+            result = await self.async_send_relogin_sms()
+            _LOGGER.info("%s 自动重登发码结果: %s", self.entry.title, result)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("%s 自动重登发码失败: %s", self.entry.title, err)
+
+    async def async_send_relogin_sms(self) -> str:
+        """token 失效后自动下发登录短信（限频 5 分钟）。"""
+        import time as _time
+
+        now = _time.time()
+        if now - getattr(self, "_last_sms_sent_at", 0.0) < 300:
+            return "cooldown"
+        client = self._build_relogin_client()
+        if client is None:
+            return "unsupported"
+        self._last_sms_sent_at = now
+        if self.carrier == "telecom":
+            ok = await client.async_login_sms_send()
+        else:
+            hint = await client.async_sms_trigger()
+            ok = "已下发" in hint or "成功" in hint
+        if ok:
+            self.hass.components.persistent_notification.async_create(
+                title="中国运营商话费监控",
+                message=(
+                    f"{self.entry.title} 登录已过期，验证码短信已自动下发到手机。\n\n"
+                    "转发器（smsForward / iOS 快捷指令）POST 到 "
+                    "`/api/webhook/cn_carrier_monitor_sms`，"
+                    'JSON: {"phone": "号码", "code": "验证码"} 即可自动完成重登；'
+                    "也可在集成的重新认证里手动输入。"
+                ),
+                notification_id=f"{DOMAIN}_sms_{self.entry.entry_id}",
+            )
+        return "sent" if ok else "failed"
+
+    def _build_relogin_client(self):
+        from .api import TelecomClient, UnicomClient
+
+        if self.carrier == "telecom":
+            return TelecomClient(self.session, dict(self.entry.data))
+        if self.carrier == "unicom":
+            return UnicomClient(self.session, dict(self.entry.data))
+        return None
+
+    async def async_complete_sms_relogin(self, code: str) -> bool:
+        """用新验证码完成重登并写回条目。"""
+        client = self._build_relogin_client()
+        if client is None:
+            return False
+        if self.carrier == "telecom":
+            creds = await client.async_login_sms_submit(code)
+            updates = {
+                "token": creds["token"],
+                "province_code": creds["province_code"],
+                "city_code": creds["city_code"],
+            }
+        else:
+            creds = await client.async_sms_login(code)
+            updates = {"token": creds["token"]}
+        new_data = {**self.entry.data, **updates}
+        self.hass.config_entries.async_update_entry(self.entry, data=new_data)
+        # 重建 client 以载入新 token
+        self.client = create_client(self.carrier, self.session, dict(new_data))
+        await self.async_request_refresh()
+        self.hass.components.persistent_notification.async_dismiss(
+            f"{DOMAIN}_sms_{self.entry.entry_id}"
+        )
+        return True
 
     async def async_shutdown(self) -> None:
         await super().async_shutdown()

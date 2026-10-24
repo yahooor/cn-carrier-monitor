@@ -104,11 +104,39 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     # ------------------------------------------------------------------ user
 
     async def async_step_user(self, user_input=None):
+        # REST/UI 直接以 source=reauth 发起的流程不会经过 async_step_reauth，
+        # 从 flow context 里补解析目标条目
+        if (
+            self._reauth_entry is None
+            and self.context.get("source") == "reauth"
+            and self.context.get("entry_id")
+        ):
+            self._reauth_entry = self.hass.config_entries.async_get_entry(
+                self.context["entry_id"]
+            )
         if self._reauth_entry is not None:
             entry = self._reauth_entry
             self._carrier = entry.data[CONF_CARRIER]
             self._phone = entry.data.get(CONF_PHONE, "")
             mode = entry.data.get(CONF_AUTH_MODE, "")
+            # 电信短信模式 reauth：手机号已知 → 自动发码直达输码步
+            if (
+                self._carrier == CARRIER_TELECOM
+                and entry.data.get(CONF_AUTH_MODE) == AUTH_TELECOM_SMS
+                and entry.data.get(CONF_PHONE)
+            ):
+                self._sms_sent = False
+                session = async_create_clientsession(self.hass)
+                sent = False
+                try:
+                    client = TelecomClient(session, dict(entry.data))
+                    sent = await client.async_login_sms_send()
+                except CarrierError as err:
+                    _LOGGER.warning("电信 reauth 自动发码失败: %s", err)
+                finally:
+                    await session.close()
+                if sent:
+                    return await self.async_step_telecom_sms_code()
             route = {
                 (CARRIER_TELECOM, AUTH_TELECOM_PASSWORD): "telecom",
                 (CARRIER_TELECOM, AUTH_TELECOM_SMS): "telecom_sms",
@@ -508,15 +536,13 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             self._phone = user_input[CONF_PHONE]
             if not self._sms_sent:
+                # 服务端代发常被移动风控拒绝（官方要求发码发生在用户侧网络），
+                # 失败不阻断：进入输码步，引导用户在官方渠道触发验证码
                 try:
                     await async_send_sms_code(self._session(), self._phone)
                 except CarrierError as err:
-                    errors["base"] = "mobile_sms_send_failed"
-                    _LOGGER.warning("移动验证码发送失败: %s", err)
-                else:
-                    self._sms_sent = True
-            if self._sms_sent:
-                return await self.async_step_mobile_sms_code()
+                    _LOGGER.info("移动服务端代发未成功（改为用户侧取码）: %s", err)
+            return await self.async_step_mobile_sms_code()
         return self.async_show_form(
             step_id="mobile_sms",
             data_schema=vol.Schema(_phone_schema(self._phone)),

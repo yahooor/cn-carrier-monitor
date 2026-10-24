@@ -60,7 +60,7 @@
       },
       "mobile_sms_code": {
         "title": "China Mobile (SMS)",
-        "description": "Enter the SMS verification code.",
+        "description": "If no code arrived automatically: open wx.10086.cn (or the official app login page) on your phone, request the code there, then enter it below. China Mobile blocks server-side SMS sending.",
         "data": {
           "code": "SMS code",
           "interval": "Refresh interval (minutes)"
@@ -209,6 +209,11 @@
       },
       "sms_remain": {
         "name": "SMS remaining"
+      }
+    },
+    "button": {
+      "refresh_now": {
+        "name": "Refresh now"
       }
     }
   },

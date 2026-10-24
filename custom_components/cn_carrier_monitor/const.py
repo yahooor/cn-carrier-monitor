@@ -4,7 +4,7 @@ DOMAIN = "cn_carrier_monitor"
 NAME = "中国运营商话费监控"
 MANUFACTURER = "China Carrier Monitor"
 
-PLATFORMS = ["sensor"]
+PLATFORMS = ["sensor", "button"]
 
 # ---------------------------------------------------------------- carriers
 CARRIER_TELECOM = "telecom"    # 中国电信

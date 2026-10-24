@@ -36,6 +36,9 @@ async def async_setup(hass: HomeAssistant, config) -> bool:
     hass.services.async_register(
         DOMAIN, SERVICE_REFRESH, async_refresh, schema=REFRESH_SCHEMA
     )
+    from . import webhook as _webhook
+
+    _webhook.async_register(hass)
     return True
 
 
