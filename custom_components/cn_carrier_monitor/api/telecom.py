@@ -365,9 +365,19 @@ class TelecomClient(CarrierClient):
         import json
 
         try:
-            return json.loads(body)
+            result = json.loads(body)
         except ValueError as err:
             raise CarrierError(f"套餐查询响应异常: {body[:120]}") from err
+        # 精确判定会话失效（headerInfos.code / reason 关键词，Pocket-Carrier 验证），
+        # 业务性提示（如详单授权）不会被误判
+        hdr = result.get("headerInfos") or {}
+        hdr_code = str(hdr.get("code") or "")
+        hdr_reason = str(hdr.get("reason") or "")
+        if hdr_code in AUTH_EXPIRED_CODES or any(
+            kw in hdr_reason.lower() for kw in AUTH_EXPIRED_HINTS
+        ):
+            raise CarrierAuthError("telecom_session_expired", f"{hdr_code}: {hdr_reason}")
+        return result
 
     async def async_fetch(self) -> dict[str, Any]:
         data = empty_data("telecom", self.phone)

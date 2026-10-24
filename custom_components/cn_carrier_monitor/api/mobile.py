@@ -605,7 +605,12 @@ class MobileClient(CarrierClient):
             data["sms"] = usage_block(used, total, remain)
 
     def export_credentials(self) -> dict[str, Any]:
-        return {"device_id": self._device_id}
+        exported = {"device_id": self._device_id}
+        # native 通道 refreshSession 会滑动顺延 Cookie；把合并后的会话带回写
+        merged = self._parse_cookie_header()
+        if merged:
+            exported["cookies"] = "; ".join(f"{k}={v}" for k, v in merged.items())
+        return exported
 
 
 def empty_snapshot(carrier: str, phone: str) -> dict[str, Any]:

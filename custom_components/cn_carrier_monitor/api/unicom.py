@@ -94,6 +94,10 @@ APPID_TEMPLATE = (
 UNICOM_LOGIN_WEB = "https://m.client.10010.com/login-web"
 UNICOM_APP_UA = "ChinaUnicom4.x/13.1 CFNetwork/1410 iOS/17.0 unicom{version:iphone_c@13.1000}"
 UNICOM_RANDOM_LOGIN_URL = "https://m.client.10010.com/mobileService/radomLogin.htm"
+# 首页七宫格概览（Pocket-Carrier 验证：余额/流量/语音/积分一次拿全）
+UNICOM_USERINFO_SEVEN_URL = (
+    "https://m.client.10010.com/mobileserviceimportant/home/queryUserInfoSeven"
+)
 UNICOM_SEND_RANDOM_URL = "https://m.client.10010.com/mobileService/sendRadomNum.htm"
 
 
@@ -271,6 +275,7 @@ class UnicomClient(CarrierClient):
         self._password = str(data.get("password") or "")
         self._app_id = str(data.get("app_id") or "") or generate_app_id()
         self._token_online = str(data.get("token") or "")
+        self._desmobile = str(data.get("phone") or "")
 
     # ------------------------------------------------------------------ sms login
 
@@ -463,8 +468,11 @@ class UnicomClient(CarrierClient):
             return False
         if str(result.get("code") or "") != "0":
             return False
-        if str(result.get("desmobile") or "") not in ("", self.phone):
+        desmobile = str(result.get("desmobile") or "")
+        if desmobile and self.phone and desmobile != self.phone:
             raise CarrierAuthError("unicom_session_mismatch")
+        if desmobile:
+            self._desmobile = desmobile
         new_token = result.get("token_online")
         if new_token:
             self._token_online = str(new_token)
@@ -484,6 +492,48 @@ class UnicomClient(CarrierClient):
         except ValueError as err:
             raise CarrierError(f"联通查询响应异常: {body[:120]}") from err
 
+    async def _async_overview_seven(self) -> dict[str, Any] | None:
+        """queryUserInfoSeven 概览：code=="Y" 时一次拿到余额/流量/语音/积分。"""
+        try:
+            status, body = await self._request(
+                "GET", UNICOM_USERINFO_SEVEN_URL,
+                headers={"User-Agent": UNICOM_UA},
+            )
+            payload = json.loads(body)
+        except (CarrierError, ValueError) as err:
+            _LOGGER.debug("queryUserInfoSeven 失败（忽略）: %s", err)
+            return None
+        if not isinstance(payload, dict) or payload.get("code") != "Y":
+            return None
+        return payload
+
+    def _apply_overview_seven(self, payload: dict[str, Any], data: dict[str, Any]) -> None:
+        """把七宫格概览字段映射进归一化结构。"""
+        def _strip_unit(value: Any) -> float | None:
+            if value is None:
+                return None
+            text = str(value)
+            num = to_float(__import__("re").match(r"(-?[\d.]+)", text).group(1)) if __import__("re").match(r"(-?[\d.]+)", text) else None
+            return num
+
+        data["balance"] = _strip_unit(payload.get("balance"))
+        flow = _strip_unit(payload.get("flow"))
+        if flow is not None and "GB" in str(payload.get("flow", "")).upper():
+            data.setdefault("extra", {})
+            if data.get("flow_general") is None and flow:
+                data["extra"]["flow_remaining_gb_hint"] = flow
+        voice = _strip_unit(payload.get("voice"))
+        if voice is not None and data.get("voice") is None:
+            data["voice"] = {"used": None, "total": None, "remain": voice}
+        points = _strip_unit(payload.get("integral") or payload.get("jifen"))
+        if points is not None and data.get("points") is None:
+            data["points"] = points
+        if payload.get("flush_date_time"):
+            data["extra"]["flush_time"] = payload.get("flush_date_time")
+        location = payload.get("location") or ""
+        if location:
+            data["extra"]["location"] = location
+
     async def async_fetch(self) -> dict[str, Any]:
         data = empty_data("unicom", self.phone)
         if not self._password and not self._token_online:
@@ -491,6 +541,19 @@ class UnicomClient(CarrierClient):
         if not self._token_online:
             creds = await self.async_login(self.phone, self._password)
             self._token_online = creds["token"]
+
+        # 轻量保活：每次拉取前 onLine 一次（Pocket-Carrier keep_alive 模式）
+        try:
+            await self._async_renew()
+        except CarrierAuthError:
+            raise
+        except CarrierError as err:
+            _LOGGER.debug("联通保活失败（忽略）: %s", err)
+
+        # 概览接口优先（一次拿全），失败不阻断明细链路
+        overview = await self._async_overview_seven()
+        if overview:
+            self._apply_overview_seven(overview, data)
 
         try:
             package = await self._query_url(UNICOM_PACKAGE_URL)
@@ -508,12 +571,14 @@ class UnicomClient(CarrierClient):
             balance_payload = await self._query_url(UNICOM_BALANCE_URL)
             balance_data = balance_payload.get("data") if isinstance(balance_payload.get("data"), dict) else {}
             if balance_data:
-                data["balance"] = to_float(
-                    balance_data.get("canusefeecustNew") or balance_data.get("canusefeecust")
-                )
-                data["month_cost"] = to_float(
-                    balance_data.get("totalrealfee") or balance_data.get("realfeecustnew")
-                )
+                if data.get("balance") is None:
+                    data["balance"] = to_float(
+                        balance_data.get("canusefeecustNew") or balance_data.get("canusefeecust")
+                    )
+                if data.get("month_cost") is None:
+                    data["month_cost"] = to_float(
+                        balance_data.get("totalrealfee") or balance_data.get("realfeecustnew")
+                    )
                 if balance_data.get("packageName"):
                     data["plan_name"] = balance_data.get("packageName")
         except CarrierError as err:
@@ -524,7 +589,9 @@ class UnicomClient(CarrierClient):
         return finish(data)
 
     def export_credentials(self) -> dict[str, Any]:
-        return {"token": self._token_online, "app_id": self._app_id}
+        # onLine 续期会轮换 token_online —— 写回后重启不丢会话
+        exported = {"token": self._token_online, "app_id": self._app_id}
+        return exported
 
 
 class UnicomOpenIdClient(CarrierClient):

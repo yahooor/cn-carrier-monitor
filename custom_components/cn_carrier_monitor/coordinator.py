@@ -46,13 +46,34 @@ class CarrierDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _async_update_data(self) -> dict[str, Any]:
         try:
-            return await self.client.async_fetch()
+            data = await self.client.async_fetch()
         except CarrierAuthError as err:
             raise ConfigEntryAuthFailed(str(err)) from err
         except CarrierError as err:
             raise UpdateFailed(str(err)) from err
         except Exception as err:  # noqa: BLE001
             raise UpdateFailed(f"查询失败: {err}") from err
+        # 会话滑动续期：把客户端刷新后的凭证（联通 token_online、移动 Cookie 等）
+        # 写回配置条目；服务端会话顺延后重启 HA 不丢登录态
+        try:
+            self._async_persist_credentials()
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("凭证回写失败（忽略）: %s", err)
+        return data
+
+    def _async_persist_credentials(self) -> None:
+        exported = self.client.export_credentials() or {}
+        updates = {}
+        for key, value in exported.items():
+            if not value:
+                continue
+            if self.entry.data.get(key) != value:
+                updates[key] = value
+        if not updates:
+            return
+        _LOGGER.debug("更新账号凭证（滑动续期）: %s", sorted(updates.keys()))
+        new_data = {**self.entry.data, **updates}
+        self.hass.config_entries.async_update_entry(self.entry, data=new_data)
 
     async def async_shutdown(self) -> None:
         await super().async_shutdown()
