@@ -86,7 +86,7 @@
       },
       "broadnet": {
         "title": "China Broadnet",
-        "description": "Log in at www.10099.com.cn in a browser, then copy the qryUserRes request as cURL and paste it below.",
+        "description": "Log in at {url} in a browser, then copy the qryUserRes request as cURL and paste it below.",
         "data": {
           "phone": "Phone number (optional)",
           "request_source": "cURL or request URL",
@@ -118,7 +118,7 @@
       },
       "unicom_sms": {
         "title": "China Unicom (SMS)",
-        "description": "An SMS code is requested on submit. If the server requires a slider CAPTCHA, open https://m.client.10010.com/login-web on your phone, or paste the resultToken below.",
+        "description": "An SMS code is requested on submit. If the server requires a slider CAPTCHA, open {url} on your phone, or paste the resultToken below.",
         "data": {
           "phone": "Phone number",
           "result_token": "H5 slider resultToken (optional)"

@@ -86,7 +86,7 @@
       },
       "broadnet": {
         "title": "中国广电",
-        "description": "在浏览器登录 www.10099.com.cn 后，在个人中心的 qryUserRes 请求上「以 cURL 格式复制」，粘贴到下面（也可分别填 URL 和 Cookie）。",
+        "description": "在浏览器登录 {url} 后，在个人中心的 qryUserRes 请求上「以 cURL 格式复制」，粘贴到下面（也可分别填 URL 和 Cookie）。",
         "data": {
           "phone": "手机号（可选）",
           "request_source": "cURL 或请求 URL",
@@ -118,7 +118,7 @@
       },
       "unicom_sms": {
         "title": "中国联通（短信登录）",
-        "description": "提交后尝试下发短信；若服务端要求滑块验证，请在手机打开 https://m.client.10010.com/login-web 完成验证，或把页面返回的 resultToken 粘贴到下方直接下发。",
+        "description": "提交后尝试下发短信；若服务端要求滑块验证，请在手机打开 {url} 完成验证，或把页面返回的 resultToken 粘贴到下方直接下发。",
         "data": {
           "phone": "手机号",
           "result_token": "H5 滑块 resultToken（可选）"

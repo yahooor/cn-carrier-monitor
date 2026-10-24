@@ -6,6 +6,8 @@ import json
 import re
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parent.parent
 CCM = REPO / "custom_components" / "cn_carrier_monitor"
 
@@ -88,8 +90,12 @@ def test_regression_webhook_registered_in_setup():
 
 
 def test_regression_deploy_script_md5_verification():
-    """部署脚本必须做 md5 校验 + 清 __pycache__（旧字节码导致多轮误诊）。"""
-    deploy = (REPO.parent / "deploy.py").read_text(encoding="utf-8")
+    """部署脚本必须做 md5 校验 + 清 __pycache__（旧字节码导致多轮误诊）。
+    deploy.py 属运维工件不在仓库内时跳过（CI 环境无此文件）。"""
+    deploy_path = REPO.parent / "deploy.py"
+    if not deploy_path.exists():
+        pytest.skip("deploy.py not in repo")
+    deploy = deploy_path.read_text(encoding="utf-8")
     assert "md5" in deploy and "__pycache__" in deploy
 
 

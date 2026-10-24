@@ -17,5 +17,8 @@
   ],
   "requirements": [],
   "single_config_entry": false,
-  "version": "1.2.0"
+  "version": "1.2.0",
+  "categories": [
+    "diagnostic"
+  ]
 }

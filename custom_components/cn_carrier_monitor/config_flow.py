@@ -279,6 +279,7 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="telecom_sms_phone",
             data_schema=vol.Schema(_phone_schema(self._phone)),
             errors=errors,
+            description_placeholders={"url": "e.189.cn"},
         )
 
     async def async_step_telecom_sms_code(self, user_input=None):
@@ -462,6 +463,7 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             finally:
                 pass  # HA-managed session: do not close
         placeholders.setdefault("reason", "")
+        placeholders.setdefault("url", "m.client.10010.com/login-web")
         return self.async_show_form(
             step_id="unicom_sms",
             data_schema=vol.Schema(
@@ -511,7 +513,7 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 }
             ),
             errors=errors,
-            description_placeholders={"hint": hint},
+            description_placeholders={"hint": hint, "url": "m.client.10010.com/login-web"},
         )
 
     # ------------------------------------------------------------------ mobile
@@ -595,6 +597,7 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 }
             ),
             errors=errors,
+            description_placeholders={"url": "中国移动 App 或 wx.10086.cn"},
         )
 
     async def async_step_mobile_password(self, user_input=None):
@@ -729,6 +732,7 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 }
             ),
             errors=errors,
+            description_placeholders={"url": "www.10099.com.cn"},
         )
 
     # ------------------------------------------------------------------ reauth
