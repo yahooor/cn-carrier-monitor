@@ -134,6 +134,9 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 except CarrierError as err:
                     _LOGGER.warning("电信 reauth 自动发码失败: %s", err)
                 if sent:
+                    self.hass.data.setdefault(DOMAIN, {}).setdefault(
+                        "sms_state", {}
+                    )[entry.data[CONF_PHONE]] = client.export_sms_state()
                     return await self.async_step_telecom_sms_code()
             route = {
                 (CARRIER_TELECOM, AUTH_TELECOM_PASSWORD): "telecom",
@@ -271,6 +274,9 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             finally:
                 pass  # HA-managed session: do not close
             if sent:
+                self.hass.data.setdefault(DOMAIN, {}).setdefault(
+                    "sms_state", {}
+                )[self._phone] = client.export_sms_state()
                 return await self.async_step_telecom_sms_code()
         return self.async_show_form(
             step_id="telecom_sms_phone",
@@ -287,6 +293,11 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data = {}
             try:
                 client = TelecomClient(session, {"phone": self._phone})
+                saved_state = (
+                    self.hass.data.get(DOMAIN, {}).get("sms_state", {}).get(self._phone)
+                )
+                if saved_state:
+                    client.import_sms_state(saved_state)
                 creds = await client.async_login_sms_submit(code)
                 data = {
                     CONF_CARRIER: CARRIER_TELECOM,

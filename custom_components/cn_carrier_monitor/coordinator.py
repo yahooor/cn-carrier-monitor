@@ -30,12 +30,10 @@ class CarrierDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             minutes = max(int(minutes), 5)
         except (TypeError, ValueError):
             minutes = DEFAULT_INTERVAL
-        # 每个账号独立会话，避免 Cookie 串号；强制 IPv4（运营商域名常返回
-        # IPv6 优先且内网无 v6 出口，DNS 也会偶发超时）
-        import socket as _socket
+        # 每个账号独立会话，避免 Cookie 串号；强制 IPv4 + 公共 DNS
+        from .net import build_connector
 
-        connector = aiohttp.TCPConnector(family=_socket.AF_INET, ssl=True)
-        self.session = aiohttp.ClientSession(connector=connector)
+        self.session = aiohttp.ClientSession(connector=build_connector())
         self.client = create_client(self.carrier, self.session, dict(entry.data))
         super().__init__(
             hass,
@@ -48,13 +46,19 @@ class CarrierDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             data = await self.client.async_fetch()
         except CarrierAuthError as err:
-            _LOGGER.warning(
-                "%s 认证失败(%s), supports_sms_relogin=%s",
-                self.entry.title, err, self.supports_sms_relogin,
-            )
+            _LOGGER.info("%s 认证失败(%s)", self.entry.title, err)
             if self.supports_sms_relogin:
-                # 短信模式：自动下发验证码，等 webhook/手动回填后自动恢复
                 self.hass.async_create_task(self._async_safe_send_relogin_sms())
+            # 降级保实体（Pocket-Carrier 同策略）：有历史数据时返回旧值并标记
+            # 登录失效，实体保持可用而不是整条卸载；首次（无数据）才走官方重认证
+            if isinstance(self.data, dict) and self.data:
+                degraded = dict(self.data)
+                degraded["extra"] = {
+                    **(degraded.get("extra") or {}),
+                    "login_expired": True,
+                    "login_error": str(err)[:120],
+                }
+                return degraded
             raise ConfigEntryAuthFailed(str(err)) from err
         except CarrierError as err:
             raise UpdateFailed(str(err)) from err
@@ -118,7 +122,13 @@ class CarrierDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             hint = await client.async_sms_trigger()
             ok = "已下发" in hint or "成功" in hint
         if ok:
-            self.hass.components.persistent_notification.async_create(
+            from homeassistant.components.persistent_notification import (
+                async_create as pn_create,
+                async_dismiss as pn_dismiss,
+            )
+
+            pn_create(
+                self.hass,
                 title="中国运营商话费监控",
                 message=(
                     f"{self.entry.title} 登录已过期，验证码短信已自动下发到手机。\n\n"
@@ -160,8 +170,12 @@ class CarrierDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # 重建 client 以载入新 token
         self.client = create_client(self.carrier, self.session, dict(new_data))
         await self.async_request_refresh()
-        self.hass.components.persistent_notification.async_dismiss(
-            f"{DOMAIN}_sms_{self.entry.entry_id}"
+        from homeassistant.components.persistent_notification import (
+            async_dismiss as pn_dismiss,
+        )
+
+        pn_dismiss(
+            self.hass, f"{DOMAIN}_sms_{self.entry.entry_id}"
         )
         return True
 

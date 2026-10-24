@@ -246,7 +246,9 @@ class TelecomClient(CarrierClient):
         login_result = (data or {}).get("loginSuccessResult") or {}
         token = login_result.get("token")
         if not token:
-            desc = str((data or {}).get("loginFailResult") or {}).get("reason") or hdr.get("resultDesc") or "登录未成功"
+            fail = (data or {}).get("loginFailResult") or {}
+            reason = fail.get("reason") if isinstance(fail, dict) else str(fail or "")
+            desc = reason or hdr.get("resultDesc") or "登录未成功"
             raise CarrierAuthError("telecom_sms_login_failed", str(desc))
         return {
             "phone": self.phone,
@@ -379,6 +381,15 @@ class TelecomClient(CarrierClient):
         ):
             raise CarrierAuthError("telecom_session_expired", f"{hdr_code}: {hdr_reason}")
         return result
+
+    def export_sms_state(self) -> dict[str, Any]:
+        """短信发码会话状态（key/isct/uid）——提交验证码必须与发码同状态。"""
+        return {"uid": self._uid, "key": self._key, "isct": self._isct}
+
+    def import_sms_state(self, state: dict[str, Any]) -> None:
+        self._uid = str(state.get("uid") or self._uid)
+        self._key = str(state.get("key") or "")
+        self._isct = str(state.get("isct") or "0")
 
     async def async_fetch(self) -> dict[str, Any]:
         data = empty_data("telecom", self.phone)

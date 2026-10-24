@@ -50,11 +50,15 @@ def _sms_entries(hass: HomeAssistant) -> list[ConfigEntry]:
 async def _relogin(hass: HomeAssistant, entry: ConfigEntry, code: str) -> dict:
     """Build a throw-away client from entry data, submit the code, persist, reload."""
     data = dict(entry.data)
-    connector = aiohttp.TCPConnector(family=4, ssl=True)
-    session = aiohttp.ClientSession(connector=connector)
+    from .net import build_connector
+
+    session = aiohttp.ClientSession(connector=build_connector())
     try:
         if data.get("carrier") == CARRIER_TELECOM:
             client = TelecomClient(session, data)
+            saved = hass.data.get(DOMAIN, {}).get("sms_state", {}).get(data.get("phone", ""))
+            if saved:
+                client.import_sms_state(saved)
             creds = await client.async_login_sms_submit(code)
             updates = {
                 "token": creds["token"],
