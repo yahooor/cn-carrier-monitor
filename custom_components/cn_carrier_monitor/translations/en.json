@@ -60,7 +60,7 @@
       },
       "mobile_sms_code": {
         "title": "China Mobile (SMS)",
-        "description": "If no code arrived automatically: open wx.10086.cn (or the official app login page) on your phone, request the code there, then enter it below. China Mobile blocks server-side SMS sending.",
+        "description": "If no code arrived automatically: open the China Mobile app login page (or wx.10086.cn if available), request the code there, then enter it below. China Mobile blocks server-side SMS sending.",
         "data": {
           "code": "SMS code",
           "interval": "Refresh interval (minutes)"
@@ -118,7 +118,7 @@
       },
       "unicom_sms": {
         "title": "China Unicom (SMS)",
-        "description": "An SMS code is requested on submit. If the server requires a slider CAPTCHA, open https://m.client.10010.com/login-web on your phone, or paste the resultToken below. {reason}",
+        "description": "An SMS code is requested on submit. If the server requires a slider CAPTCHA, open https://m.client.10010.com/login-web on your phone, or paste the resultToken below.",
         "data": {
           "phone": "Phone number",
           "result_token": "H5 slider resultToken (optional)"
