@@ -37,3 +37,6 @@ jobs:
         uses: hacs/action@main
         with:
           category: integration
+          ignore: brands
+      # topics 需仓库打标签(hacs/integration 等)，由仓库设置完成；brands 需
+      # home-assistant/brands 仓库 PR，均为发布期工作项，先豁免以保证 CI 可判定
