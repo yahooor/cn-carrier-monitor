@@ -1,23 +1,25 @@
-"""China Mobile (中国移动) client.
+"""China Mobile (中国移动) client — 三链路合一.
 
-登录链路（login.10086.cn，纯 HTTP，移植自 cmcc-unsub/pure_login.py 的已验证实现）：
-  1. GET  login.html                → 建立会话 Cookie
-  2. POST loadToken.action          → 风控 token（Xa-before 头）
-  3. POST sendRandomCodeAction.action → 发送短信验证码
-  4. POST login.htm                 → 手机号+验证码/服务密码（RSA PKCS1v15）
-  5. GET  assertAcceptURL?artifact  → 落 SSO Cookie（cmccssotoken 等）
+登录（与查询同一套会话，二选一或导入）：
+- sms:        login.10086.cn 网厅链路（社区逆向，cmcc-unsub 验证）
+- password:   同上链路 pwdType=01
+- cookie:     导入浏览器 Cookie（兼容 12.5 App 会话 Cookie）
 
-查询（wx.10086.cn，响应为 AES-CBC hex 编码，key/iv 见 ChinaMobileMonitor）：
-  getMainPlan / getNewMarginInfo / fareBalance
-
-Cookie 粘贴兜底：从浏览器复制 10086.cn 会话 Cookie。
+查询（双通道自动切换）：
+- 原生 12.5 App 协议（clientaccess.10086.cn，Pocket-Carrier 验证）：
+  三层签名（x-token/xs/x-sign），请求 AES key=bAIgvwAuA4tbDr9d，响应 key=GS7VelkJl5IT1uwQ，
+  iv=9791027341711819；refreshSession 保活顺延 TTL；retCode 410000/400001/... 即会话失效。
+  只需会话 Cookie（任意来源），与登录方式解耦。
+- wx.10086.cn 网厅通道（AES hex 1234123412ABCDEF）：原生协议失败时的兜底。
 """
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import logging
+import random
 import time
 import urllib.parse
 from typing import Any
@@ -36,7 +38,6 @@ from ..const import (
     MOBILE_PLAN_URL,
     MOBILE_QUERY_REFERER,
     MOBILE_SEND_SMS_URL,
-    MOBILE_UNIT_MAP,
 )
 from .base import (
     CarrierAuthError,
@@ -46,11 +47,11 @@ from .base import (
     to_float,
     usage_block,
 )
-from .crypto import decrypt_payload, rsa_encrypt_b64
+from .crypto import aes_cbc_encrypt, decrypt_payload, rsa_encrypt_b64
 
 _LOGGER = logging.getLogger(__name__)
 
-# login_qr_fun.js et() 使用的 JSEncrypt 公钥（SPKI/DER，base64）
+# ---------------------------------------------------------------- login (web)
 MOBILE_LOGIN_PUBKEY = (
     "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsgDq4OqxuEisnk2F0EJFmw4xKa5IrcqEYHvqxPs2"
     "CHEg2kolhfWA2SjNuGAHxyDDE5MLtOvzuXjBx/5YJtc9zj2xR/0moesS+Vi/xtG1tkVaTCba+TV+Y5C61iyr"
@@ -58,9 +59,6 @@ MOBILE_LOGIN_PUBKEY = (
     "C4ebooOva+mJlstW6t/1lghR8WNV8cocxgcHHuXBxgns2MlACQbSdJ8c6Z3RQeRZBzyjfey6JCCfbEKouVrW"
     "IUuPphBL3OANfgp0B+QG31bapvePTfXU48TYK0M5kE+8LgbbWQIDAQAB"
 )
-
-AES_KEY = b"1234123412ABCDEF"
-AES_IV = b"ABCDEF1234123412"
 
 LOGIN_ERROR_HINTS = {
     "6001": "mobile_code_invalid",
@@ -70,20 +68,48 @@ LOGIN_ERROR_HINTS = {
     "8002": "mobile_password_error",
 }
 
+# ---------------------------------------------------------------- native 12.5
+NATIVE_BASE = "https://clientaccess.10086.cn"
+NATIVE_REQ_KEY = b"bAIgvwAuA4tbDr9d"
+NATIVE_RESP_KEY = b"GS7VelkJl5IT1uwQ"
+NATIVE_IV = b"9791027341711819"
+NATIVE_UA = "ChinaMobile/12.5.5 (iPhone; iOS 16.1.1; Scale/3.00)"
+
+NATIVE_AUTH_EXPIRED_CODES = {"410000", "400001", "400006", "8051", "8052", "6001"}
+NATIVE_AUTH_EXPIRED_HINTS = ("请重新登录", "重新登录", "未进行任何操作", "会话已失效", "请先登录", "凭据已失效")
+
+_ENVELOPE_DEFAULTS = {
+    "sv": "16.1.1", "nt": "3", "sn": "iPhone12,5", "en": "0", "sp": "1242x2688",
+    "t": "83216123546aa27f10780c5c645b0e30",
+    "imei": "A903F8A96F7048B69764722BCF90EE8",
+    "ctid": "A903F8A96F7048B69764722BCF90EE81",
+    "cid": "bf8649694f1e86dbbe9fbcd3e26f92407695b550aa7b4d3e0f51934ac10c6666",
+    "ak": "F5AA34B89513F0D087CA0EF11A3277469DC74905",
+    "xk": "2408b2a5d0956f22ad08471f3c63d5d8e31dbca45e16a53875c4154317b270adacb3c15d",
+    "xc": "B2000", "ak2": None, "cv": "12.5.5", "sb": "apple", "st": 2,
+}
+
+WX_AES_KEY = b"1234123412ABCDEF"
+WX_AES_IV = b"ABCDEF1234123412"
+
+
+def _native_aes_b64(key: bytes, iv: bytes, plain: str) -> str:
+    """移动 12.5 请求体/令牌：AES-CBC 密文 → base64 文本。"""
+    return base64.b64encode(aes_cbc_encrypt(key, iv, plain)).decode("ascii")
+
 
 def et(value: str) -> str:
-    """Page-side et(): RSA-PKCS1v15 → base64."""
+    """Web-login RSA helper."""
     return rsa_encrypt_b64(MOBILE_LOGIN_PUBKEY, value)
 
 
 def device_identity(phone: str) -> str:
-    """Deterministic deviceId (visitorId_instanceId), 32hex_32hex."""
     visitor = hashlib.md5(("cmcc-v1|" + phone).encode()).hexdigest()
     instance = hashlib.md5(("cmcc-v1-inst|" + phone).encode()).hexdigest()
     return f"{visitor}_{instance}"
 
 
-def _login_headers(phone: str) -> dict[str, str]:
+def _login_headers() -> dict[str, str]:
     return {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -96,61 +122,10 @@ def _login_headers(phone: str) -> dict[str, str]:
     }
 
 
-async def async_send_sms_code(session, phone: str) -> None:
-    """Send the SMS login code. Shared by config flow and reauth."""
-    headers = _login_headers(phone)
-    # 1. open login page to establish the session
-    await _simple_get(session, MOBILE_LOGIN_PAGE, headers)
-    # 2. risk-control token
-    token = ""
-    for form in ({"account": phone}, {"account": et(phone)}, {}):
-        status, body = await _post_form(session, MOBILE_LOAD_TOKEN_URL, form, headers)
-        try:
-            payload = json.loads(body)
-        except ValueError:
-            payload = {}
-        candidate = (
-            (payload.get("result") or {}).get("token")
-            if isinstance(payload.get("result"), dict)
-            else None
-        ) or payload.get("token") or (payload.get("result") if isinstance(payload.get("result"), str) else "")
-        if payload.get("rspCode") in ("0000", "0") and candidate:
-            token = str(candidate)
-            break
-        if "token" in body.lower() and token:
-            break
-    extra_headers = dict(headers)
-    if token:
-        extra_headers["Xa-before"] = token
-    # 3. send SMS
-    form = {
-        "account": phone,
-        "pwdType": "02",
-        "channelID": MOBILE_CHANNEL_ID,
-        "loginMode": "",
-        "backUrl": MOBILE_BACK_URL,
-    }
-    status, body = await _post_form(
-        session, MOBILE_SEND_SMS_URL, form, extra_headers
-    )
-    text = body or ""
-    lowered = text.lower()
-    ok = any(
-        marker in lowered or marker in text
-        for marker in ("succeed", "成功", '"rspCode":"0000"', '"rspCode":"0"', '"code":"0"', "已发送")
-    )
-    if not ok:
-        snippet = text[:120].replace("\n", " ")
-        _LOGGER.debug("移动短信发送响应: HTTP %s %s", status, snippet)
-        raise CarrierError(f"移动验证码发送失败: {snippet or 'HTTP ' + str(status)}")
-
-
 async def _simple_get(session, url: str, headers: dict) -> tuple[int, str]:
     try:
         async with session.get(
-            url,
-            headers=headers,
-            timeout=aiohttp.ClientTimeout(total=30),
+            url, headers=headers, timeout=aiohttp.ClientTimeout(total=30),
             allow_redirects=True,
         ) as resp:
             return resp.status, await resp.text()
@@ -162,11 +137,8 @@ async def _simple_get(session, url: str, headers: dict) -> tuple[int, str]:
 async def _post_form(session, url: str, form: dict, headers: dict) -> tuple[int, str]:
     try:
         async with session.post(
-            url,
-            data=form,
-            headers=headers,
-            timeout=aiohttp.ClientTimeout(total=45),
-            allow_redirects=False,
+            url, data=form, headers=headers,
+            timeout=aiohttp.ClientTimeout(total=45), allow_redirects=False,
         ) as resp:
             return resp.status, await resp.text()
     except aiohttp.ClientError as err:
@@ -175,8 +147,50 @@ async def _post_form(session, url: str, form: dict, headers: dict) -> tuple[int,
         raise CarrierError(f"请求超时: {url}") from err
 
 
+async def async_send_sms_code(session, phone: str) -> None:
+    """Send the web-hall SMS login code (best-effort community-reverse-engineered)."""
+    headers = _login_headers()
+    await _simple_get(session, MOBILE_LOGIN_PAGE, headers)
+    token = ""
+    for form in ({"account": phone}, {"account": et(phone)}, {}):
+        _status, body = await _post_form(session, MOBILE_LOAD_TOKEN_URL, form, headers)
+        try:
+            payload = json.loads(body)
+        except ValueError:
+            payload = {}
+        candidate = ""
+        if isinstance(payload.get("result"), dict):
+            candidate = payload["result"].get("token") or ""
+        candidate = candidate or payload.get("token") or (
+            payload.get("result") if isinstance(payload.get("result"), str) else ""
+        )
+        if payload.get("rspCode") in ("0000", "0") and candidate:
+            token = str(candidate)
+            break
+    extra_headers = dict(headers)
+    if token:
+        extra_headers["Xa-before"] = token
+    form = {
+        "account": phone,
+        "pwdType": "02",
+        "channelID": MOBILE_CHANNEL_ID,
+        "loginMode": "",
+        "backUrl": MOBILE_BACK_URL,
+    }
+    status, body = await _post_form(session, MOBILE_SEND_SMS_URL, form, extra_headers)
+    text = body or ""
+    ok = any(
+        marker in text.lower() or marker in text
+        for marker in ("succeed", "成功", '"rspCode":"0000"', '"rspCode":"0"', '"code":"0"', "已发送")
+    )
+    if not ok:
+        snippet = text[:120].replace("\n", " ")
+        _LOGGER.debug("移动短信发送响应: HTTP %s %s", status, snippet)
+        raise CarrierError(f"mobile_sms_send_failed: {snippet or 'HTTP ' + str(status)}")
+
+
 class MobileClient(CarrierClient):
-    """移动客户端：SMS / password / cookie 三种模式。"""
+    """移动客户端：登录（web 链路）+ 查询（原生 12.5 优先，wx 网厅兜底）。"""
 
     carrier = "mobile"
 
@@ -186,19 +200,20 @@ class MobileClient(CarrierClient):
         self._password = str(data.get("password") or "")
         self._cookie = str(data.get("cookies") or "")
         self._device_id = data.get("device_id") or device_identity(self.phone)
+        # native envelope keeps a per-phone deterministic prov
+        self._prov = "451"
+        self._city = "0459"
 
     # ------------------------------------------------------------------ login
 
     async def async_submit_code(self, phone: str, code: str) -> None:
-        """Submit the SMS code and establish the SSO session."""
         await self._login_submit(phone, code, "02")
 
     async def async_login_password(self, phone: str, password: str) -> None:
-        """Submit the service password and establish the SSO session."""
         await self._login_submit(phone, password, "01")
 
     async def _login_submit(self, phone: str, secret: str, pwd_type: str) -> None:
-        headers = _login_headers(phone)
+        headers = _login_headers()
         await _simple_get(self._session, MOBILE_LOGIN_PAGE, headers)
         ts = str(int(time.time() * 1000))
         enc = et(secret)
@@ -245,12 +260,225 @@ class MobileClient(CarrierClient):
                 f"{base}?backUrl={urllib.parse.quote(MOBILE_BACK_URL, safe='')}"
                 f"&artifact={result.get('artifact', '')}&type={result.get('type', '')}"
             )
-        status, _ = await _simple_get(self._session, target, headers)
+        await _simple_get(self._session, target, headers)
         jar_names = {c.key for c in self._session.cookie_jar}
         if "cmccssotoken" not in jar_names and "is_login" not in jar_names:
             raise CarrierError("移动登录跳转后未取得 SSO Cookie，请重试")
+        # persist for query use
+        self._cookie = "; ".join(
+            f"{c.key}={c.value}" for c in self._session.cookie_jar
+        )
 
-    # ------------------------------------------------------------------ query
+    # ------------------------------------------------------------------ native 12.5
+
+    def _parse_cookie_header(self) -> dict[str, str]:
+        jar: dict[str, str] = {}
+        for part in self._cookie.split(";"):
+            name, _, value = part.strip().partition("=")
+            if name:
+                jar[name] = value
+        # merge live session cookies (login path)
+        for c in self._session.cookie_jar:
+            jar[c.key] = c.value
+        return jar
+
+    async def _native_request(self, endpoint: str, req_body: dict | None = None) -> dict[str, Any]:
+        cookies = self._parse_cookie_header()
+        envelope = {
+            "tel": self.phone, "reqBody": req_body or {},
+            **{k: v for k, v in _ENVELOPE_DEFAULTS.items() if v is not None},
+            "prov": self._prov, "city": self._city,
+        }
+        plain = json.dumps(envelope, separators=(",", ":"))
+        enc_body = _native_aes_b64(NATIVE_REQ_KEY, NATIVE_IV, plain)
+
+        now_ms = str(int(time.time() * 1000))
+        nonce = str(random.randint(10000000, 99999999))
+        full_url = f"{NATIVE_BASE}/{endpoint.lstrip('/')}"
+        x_token = _native_aes_b64(
+            NATIVE_REQ_KEY, NATIVE_IV,
+            f"{_ENVELOPE_DEFAULTS['xk']}_/{endpoint.lstrip('/')}_{now_ms}_{nonce}")
+        xs = hashlib.md5(f"{full_url}_{plain}_Leadeon/SecurityOrganization".encode()).hexdigest()
+        jsessionid = cookies.get("JSESSIONID", "")
+        x_sign = hashlib.md5(f"{x_token}_{now_ms}_{nonce}_{jsessionid}".encode()).hexdigest()
+
+        headers = {
+            "User-Agent": NATIVE_UA,
+            "Content-Type": "application/Json",
+            "Accept": "*/*",
+            "Accept-Language": "zh-Hans;q=1, zh-Hans-CN;q=0.9, en-CN;q=0.8",
+            "Connection": "keep-alive",
+            "x-qen": "2",
+            "x-time": now_ms,
+            "x-nonce": nonce,
+            "x-token": x_token,
+            "xs": xs,
+            "x-sign": x_sign,
+        }
+        if cookies:
+            headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
+
+        status, body = await self._request(
+            "POST", full_url, headers=headers,
+            data=enc_body,
+            content_type_override="application/Json",
+        )
+        if status in (401, 403):
+            raise CarrierAuthError("mobile_session_expired", f"HTTP {status}")
+        text = body.strip()
+        if not text:
+            return {}
+        # response is base64 AES; try native decrypt then fall back to plain JSON
+        payload: dict[str, Any] | None = None
+        try:
+            from .crypto import aes_cbc_decrypt
+
+            cipher_raw = base64.b64decode(text)
+            payload = json.loads(aes_cbc_decrypt(NATIVE_RESP_KEY, NATIVE_IV, cipher_raw))
+        except Exception:  # noqa: BLE001 - fall back below
+            try:
+                payload = json.loads(text)
+            except ValueError:
+                payload = None
+        if not isinstance(payload, dict):
+            raise CarrierError("移动原生接口响应无法解析")
+        ret_code = str(payload.get("retCode") or payload.get("code") or "")
+        ret_desc = str(payload.get("retDesc") or payload.get("desc") or "")
+        if ret_code in NATIVE_AUTH_EXPIRED_CODES or any(
+            kw in ret_desc for kw in NATIVE_AUTH_EXPIRED_HINTS
+        ):
+            raise CarrierAuthError("mobile_session_expired", f"[{ret_code}] {ret_desc}")
+        return payload
+
+    async def _native_fetch(self, data: dict[str, Any]) -> bool:
+        """Fill data via native endpoints; returns True on any success."""
+        ok = False
+        # 0. 保活顺延 TTL（失败忽略）
+        try:
+            await self._native_request("biz-orange/DN/refreshSession", {"cellNum": self.phone})
+        except CarrierAuthError:
+            raise
+        except CarrierError as err:
+            _LOGGER.debug("移动 refreshSession 忽略: %s", err)
+        # 1. 余额
+        try:
+            fee = await self._native_request(
+                "biz-orange/BN/realFeeQuery/getRealFee", {"cellNum": self.phone}
+            )
+            body = fee.get("rspBody") or {}
+            if isinstance(body, dict) and body:
+                balance = to_float(
+                    body.get("curFeeTotal") or body.get("curFee") or body.get("realBalanceFee")
+                )
+                if balance is not None:
+                    data["balance"] = balance
+                    ok = True
+                real_fee = to_float(body.get("realFee"))
+                if real_fee is not None:
+                    data["month_cost"] = real_fee
+                owe = to_float(body.get("oweFee"))
+                if owe:
+                    data["extra"]["owe_fee"] = owe
+        except CarrierAuthError:
+            raise
+        except CarrierError as err:
+            _LOGGER.debug("移动 getRealFee 失败: %s", err)
+        # 2. 套餐余量
+        try:
+            plan = await self._native_request(
+                "biz-orange/BH/newPlanRemainQry/getNewPlanRemainQry", {"cellNum": self.phone}
+            )
+            self._parse_native_plan(plan, data)
+            ok = True
+        except CarrierAuthError:
+            raise
+        except CarrierError as err:
+            _LOGGER.debug("移动 getNewPlanRemainQry 失败: %s", err)
+        # 3. 积分
+        try:
+            score = await self._native_request(
+                "biz-orange/BN/scoreQueryService/getScoreQuery", {"cellNum": self.phone}
+            )
+            body = score.get("rspBody") or {}
+            if isinstance(body, dict):
+                points = to_float(body.get("score") or body.get("totalScore"))
+                if points is not None:
+                    data["points"] = points
+        except CarrierError as err:
+            _LOGGER.debug("移动积分查询失败: %s", err)
+        return ok
+
+    def _parse_native_plan(self, payload: dict[str, Any], data: dict[str, Any]) -> None:
+        """解析 12.5 getNewPlanRemainQry 响应（Pocket-Carrier 验证的结构）。
+
+        rspBody.newPlanRemainQryRes.planRemianFlowListRes.planRemianFlowRes[]:
+          flowRemainNum/flowUsdNum/flowSumNum + unit（02=KB 03=MB 04=GB）
+        rspBody.newPlanRemainQryRes.planRemianVoiceListRes.planRemianVoiceInfoRes[]:
+          voiceRemainNum/voiceUsdNum/voiceSumNum（分钟）
+        """
+        rsp = payload.get("rspBody") or {}
+        qry = rsp.get("newPlanRemainQryRes") or {}
+        if not isinstance(qry, dict):
+            return
+
+        def _to_mb(value: Any, unit: str) -> float:
+            num = to_float(value) or 0.0
+            if unit == "04":   # GB → MB
+                return num * 1024.0
+            if unit == "02":   # KB → MB
+                return num / 1024.0
+            return num          # 03 MB
+
+        flow_node = (qry.get("planRemianFlowListRes") or {}).get("planRemianFlowRes") or []
+        if isinstance(flow_node, list) and flow_node:
+            remain_mb = used_mb = sum_mb = 0.0          # 全量（含定向）
+            gen_remain = gen_used = gen_sum = 0.0       # 通用（排除定向）
+            items: list[dict[str, Any]] = []
+            for item in flow_node:
+                if not isinstance(item, dict):
+                    continue
+                unit = str(item.get("unit") or "03")
+                rem = _to_mb(item.get("flowRemainNum"), unit)
+                usd = _to_mb(item.get("flowUsdNum"), unit)
+                sm = _to_mb(item.get("flowSumNum"), unit)
+                remain_mb += rem
+                used_mb += usd
+                sum_mb += sm
+                name = str(item.get("mealTypeDesc") or item.get("flowTypeDesc") or "流量套餐")
+                directed = "定向" in name or "专属" in name
+                if not directed:
+                    gen_remain += rem
+                    gen_used += usd
+                    gen_sum += sm
+                items.append({
+                    "name": name, "used": round(usd / 1024, 2),
+                    "remain": round(rem / 1024, 2), "total": round(sm / 1024, 2),
+                })
+                if directed and data["flow_directed"] is None:
+                    data["flow_directed"] = usage_block(
+                        round(usd / 1024, 2), round(sm / 1024, 2), round(rem / 1024, 2)
+                    )
+            data["flow_general"] = usage_block(
+                round(gen_used / 1024, 2), round(gen_sum / 1024, 2), round(gen_remain / 1024, 2)
+            )
+            data["flow_total"] = usage_block(
+                round(used_mb / 1024, 2), round(sum_mb / 1024, 2), round(remain_mb / 1024, 2)
+            )
+            if items:
+                data["extra"]["flow_items"] = items
+
+        voice_node = (qry.get("planRemianVoiceListRes") or {}).get("planRemianVoiceInfoRes") or []
+        if isinstance(voice_node, list) and voice_node:
+            v_rem = v_usd = v_sum = 0.0
+            for item in voice_node:
+                if not isinstance(item, dict):
+                    continue
+                v_rem += to_float(item.get("voiceRemainNum")) or 0
+                v_usd += to_float(item.get("voiceUsdNum")) or 0
+                v_sum += to_float(item.get("voiceSumNum")) or 0
+            data["voice"] = usage_block(round(v_usd), round(v_sum), round(v_rem))
+
+    # ------------------------------------------------------------------ wx fallback
 
     def _query_headers(self) -> dict[str, str]:
         headers = {
@@ -273,69 +501,76 @@ class MobileClient(CarrierClient):
             "GET", f"{url}{sep}t={ts}", headers=self._query_headers()
         )
         if status != 200:
-            _LOGGER.debug("移动查询 %s HTTP %s", url, status)
+            _LOGGER.debug("移动网厅查询 %s HTTP %s", url, status)
             return None
-        text = decrypt_payload(body, AES_KEY, AES_IV)
+        text = decrypt_payload(body, WX_AES_KEY, WX_AES_IV)
         try:
             payload = json.loads(text)
         except ValueError:
-            _LOGGER.debug("移动查询 %s 响应非 JSON: %s", url, text[:120])
+            _LOGGER.debug("移动网厅查询 %s 响应非 JSON: %s", url, text[:120])
             return None
         if not isinstance(payload, dict):
             return None
-        # 登录态校验：部分接口会返回需要登录的标记
         joined = json.dumps(payload, ensure_ascii=False)[:2000]
         if any(mark in joined for mark in ("请登录", "login.htm", "notLogin", "未登录")):
             raise CarrierAuthError("mobile_session_expired")
         return payload
 
-    async def async_fetch(self) -> dict[str, Any]:
-        data = empty_data("mobile", self.phone)
-        if self._mode == "cookie" and not self._cookie:
-            raise CarrierAuthError("缺少登录会话，请重新登录")
+    # ------------------------------------------------------------------ fetch
 
-        # 套餐名
+    async def async_fetch(self) -> dict[str, Any]:
+        data = empty_snapshot("mobile", self.phone)
+        if self._mode == "cookie" and not self._cookie:
+            raise CarrierAuthError("mobile_session_missing")
+
+        native_ok = False
+        try:
+            native_ok = await self._native_fetch(data)
+        except CarrierAuthError:
+            raise
+        except CarrierError as err:
+            _LOGGER.debug("移动原生通道失败，转网厅通道: %s", err)
+
+        if not native_ok:
+            await self._wx_fetch(data)
+
+        if (
+            data["plan_name"] is None
+            and data["balance"] is None
+            and data["flow_total"] is None
+            and data["voice"] is None
+        ):
+            raise CarrierAuthError("mobile_session_expired")
+        return finish(data)
+
+    async def _wx_fetch(self, data: dict[str, Any]) -> None:
         plan = await self._wx_query(MOBILE_PLAN_URL)
         if plan:
             data["plan_name"] = (
                 ((plan.get("object") or {}).get("resultData") or {}).get("curPlanName")
             ) or None
-
-        # 余额
         fee = await self._wx_query(MOBILE_FEE_URL)
-        if fee:
+        if fee and data["balance"] is None:
             fee_rsp = (fee.get("data") or {}).get("realFeeQryRsp") or {}
             data["balance"] = to_float(fee_rsp.get("curFeeTotal"))
             if data["balance"] is None:
                 data["balance"] = to_float(fee_rsp.get("realFee"))
-
-        # 余量（流量/语音/短信）
         margin = await self._wx_query(MOBILE_MARGIN_URL)
         if margin:
             self._parse_margin(margin, data)
-
-        if data["plan_name"] is None and data["balance"] is None and margin is None:
-            raise CarrierAuthError("mobile_session_expired")
-        return finish(data)
 
     def _parse_margin(self, payload: dict[str, Any], data: dict[str, Any]) -> None:
         rd = (payload.get("data") or {}).get("resultData") or {}
 
         def _item(raw: dict) -> tuple[Any, Any, Any, str]:
-            return (
-                raw.get("usedNum"),
-                raw.get("sumNum"),
-                raw.get("remainNum"),
-                str(raw.get("unit") or "04"),
-            )
+            return (raw.get("usedNum"), raw.get("sumNum"), raw.get("remainNum"),
+                    str(raw.get("unit") or "04"))
 
         def _scale(value: Any, unit: str) -> Any:
             num = to_float(value)
             if num is None:
                 return None
-            if unit == "03":  # MB → GB
-                return round(num / 1024, 2)
-            return round(num, 2)
+            return round(num / 1024, 2) if unit == "03" else round(num, 2)
 
         flow = rd.get("planRemainFlowInfo") or rd.get("planRemianFlowInfo") or {}
         if flow:
@@ -357,17 +592,24 @@ class MobileClient(CarrierClient):
         voice = rd.get("planRemainVoiceInfo") or rd.get("planRemianVoiceInfo") or {}
         if voice:
             plan = voice.get("planRemain") or voice.get("planRemian") or {}
-            used, total, remain, unit = _item(plan)
+            used, total, remain, _unit = _item(plan)
             data["voice"] = usage_block(used, total, remain)
 
         sms = rd.get("planRemainMSGInfo") or rd.get("planRemianMSGInfo") or {}
         if sms:
             note = sms.get("notePlanRemain") or sms.get("notePlanRemian") or {}
-            used, total, remain, unit = _item(note)
+            used, total, remain, _unit = _item(note)
             if used is None and total is None:
                 note = sms.get("totalInfo") or {}
-                used, total, remain, unit = _item(note)
+                used, total, remain, _unit = _item(note)
             data["sms"] = usage_block(used, total, remain)
 
     def export_credentials(self) -> dict[str, Any]:
         return {"device_id": self._device_id}
+
+
+def empty_snapshot(carrier: str, phone: str) -> dict[str, Any]:
+    """Local import to avoid circular dependency with base."""
+    from .base import empty_data
+
+    return empty_data(carrier, phone)

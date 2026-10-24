@@ -16,9 +16,16 @@ _LOGGER = logging.getLogger(__name__)
 class CarrierError(Exception):
     """A recoverable carrier API error (connection/protocol/remote)."""
 
+    def __init__(self, message: str, detail: str | None = None) -> None:
+        super().__init__(message)
+        self.detail = detail
+
 
 class CarrierAuthError(CarrierError):
     """The stored credentials/session are no longer accepted."""
+
+    def __init__(self, message: str, detail: str | None = None) -> None:
+        super().__init__(message, detail)
 
 
 def empty_data(carrier: str, phone: str) -> dict[str, Any]:
@@ -93,19 +100,23 @@ class CarrierClient:
         *,
         json_body: dict | None = None,
         form: dict | None = None,
+        data: str | None = None,
         headers: dict | None = None,
         timeout: int = REQUEST_TIMEOUT,
         allow_error_status: bool = True,
+        content_type_override: str | None = None,
     ) -> tuple[int, str]:
         merged = {"User-Agent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36"}
         if headers:
             merged.update(headers)
+        if content_type_override:
+            merged["Content-Type"] = content_type_override
         try:
             async with self._session.request(
                 method,
                 url,
                 json=json_body,
-                data=form,
+                data=data if data is not None else form,
                 headers=merged,
                 timeout=aiohttp.ClientTimeout(total=timeout),
                 allow_redirects=False,

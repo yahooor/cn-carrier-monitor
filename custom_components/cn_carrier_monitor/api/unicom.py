@@ -16,6 +16,7 @@ import logging
 import random
 import re
 import time
+import urllib.parse
 from typing import Any
 
 import aiohttp
@@ -89,9 +90,32 @@ APPID_TEMPLATE = (
     "59af546f3c826988332376b7d18c8ea2398ee3a9c3db947e2471d32a49{d}{d}"
 )
 
+# 联通 H5 登录风控链路（Pocket-Carrier）
+UNICOM_LOGIN_WEB = "https://m.client.10010.com/login-web"
+UNICOM_APP_UA = "ChinaUnicom4.x/13.1 CFNetwork/1410 iOS/17.0 unicom{version:iphone_c@13.1000}"
+UNICOM_RANDOM_LOGIN_URL = "https://m.client.10010.com/mobileService/radomLogin.htm"
+UNICOM_SEND_RANDOM_URL = "https://m.client.10010.com/mobileService/sendRadomNum.htm"
+
 
 def _rand_digit() -> str:
     return str(random.randint(0, 9))
+
+
+def _base_login_params(device_id: str) -> dict[str, str]:
+    return {
+        "version": "iphone_c@13.1000", "currentVersion": "iphone_c@13.1000",
+        "deviceId": device_id, "deviceCode": device_id,
+        "deviceModel": "iPhone14,3", "deviceOS": "ios16.0",
+        "netWay": "Wifi", "deviceBrand": "iPhone", "pip": "127.0.0.1",
+        "reqtime": str(int(time.time() * 1000)),
+    }
+
+
+def _rsa_login_urlenc(value: str) -> str:
+    """App 登录族 RSA → base64 → urlencode（Pocket-Carrier rsa_old）。"""
+    return urllib.parse.quote(
+        rsa_encrypt_b64(UNICOM_LOGIN_PUBKEY, value), safe=""
+    )
 
 
 def generate_app_id() -> str:
@@ -248,6 +272,128 @@ class UnicomClient(CarrierClient):
         self._app_id = str(data.get("app_id") or "") or generate_app_id()
         self._token_online = str(data.get("token") or "")
 
+    # ------------------------------------------------------------------ sms login
+
+    async def async_sms_trigger(self) -> str:
+        """联通短信登录第一步：trigger_risk 拿 mobile_hex（供 H5 滑块页使用）。
+
+        返回提示语：用户在手机 H5 页面过滑块后短信即下发；也可把页面返回的
+        resultToken 粘贴到集成里（async_sms_send_with_token）直接下发。
+        """
+        device_id = self._app_id[:32].replace("-", "") or __import__("uuid").uuid4().hex
+        form = {
+            **_base_login_params(device_id),
+            "resultToken": "", "loginCodeLen": "6",
+            "mobile": _rsa_login_urlenc(self.phone),
+            "requestLoginCurrentAccount": self.phone,
+            "msg_type": "", "ios_open": "1",
+        }
+        status, body = await self._request(
+            "POST", UNICOM_SEND_RANDOM_URL, form=form,
+            headers={"User-Agent": UNICOM_APP_UA,
+                     "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"},
+        )
+        if status != 200:
+            raise CarrierError(f"联通短信下发接口 HTTP {status}")
+        try:
+            payload = json.loads(body)
+        except ValueError as err:
+            raise CarrierError(f"联通短信下发响应异常: {body[:120]}") from err
+        desc = str(payload.get("dsc") or payload.get("desc") or "")
+        code = str(payload.get("code") or "")
+        self._sms_device_id = device_id
+        if code in ("0", "0000") or "成功" in desc:
+            return "短信验证码已下发"
+        # 未过滑块时服务端会要求验证 —— 引导用户去 H5 页面操作
+        return (
+            f"需要先通过官方滑块验证：手机打开 https://m.client.10010.com/login-web "
+            f"输入本机号并完成滑块，短信会自动下发；若页面返回 resultToken，可粘贴到集成中直接下发。"
+            f"（服务端提示: {desc or code}）"
+        )
+
+    async def async_sms_send_with_token(self, result_token: str) -> None:
+        """用 H5 滑块成功后的 resultToken 直接下发短信（Pocket-Carrier createSms）。"""
+        # 先协商密钥拿 mobile_hex
+        status, body = await self._request(
+            "POST", f"{UNICOM_LOGIN_WEB}/v1/safeInfo/getKey",
+            json_body={"scene": "login"},
+            headers={"User-Agent": UNICOM_APP_UA, "Content-Type": "application/json",
+                     "Origin": "https://img.client.10010.com",
+                     "Referer": "https://img.client.10010.com/loginRisk/index.html"},
+        )
+        mobile_hex = ""
+        try:
+            key_payload = json.loads(body)
+            mobile_hex = str((key_payload.get("data") or {}).get("mobile") or "")
+        except ValueError:
+            pass
+        headers = {
+            "User-Agent": UNICOM_APP_UA, "Content-Type": "application/json",
+            "Origin": "https://img.client.10010.com",
+            "Referer": "https://img.client.10010.com/loginRisk/index.html",
+            "scene-key": "login",
+        }
+        import uuid as _uuid
+
+        payload = {
+            "seq": str(_uuid.uuid4()), "mobile": mobile_hex,
+            "resultToken": result_token,
+        }
+        status, body = await self._request(
+            "POST", f"{UNICOM_LOGIN_WEB}/v1/sms/createSms",
+            json_body=payload, headers=headers,
+        )
+        ok = False
+        try:
+            result = json.loads(body)
+            ok = str(result.get("code")) in ("0000", "0")
+            if not ok and any(kw in body for kw in ("频繁", "拦截", "已发送")):
+                ok = True
+        except ValueError:
+            pass
+        if not ok:
+            raise CarrierError("unicom_sms_send_failed", body[:120])
+
+    async def async_sms_login(self, code: str) -> dict[str, Any]:
+        """联通短信验证码登录（radomLogin.htm，Pocket-Carrier 验证）。"""
+        device_id = getattr(self, "_sms_device_id", "") or self._app_id[:32].replace("-", "")
+        ts = time.strftime("%Y%m%d%H%M%S")
+        form = {
+            **_base_login_params(device_id),
+            "yw_code": "", "loginStyle": "0",
+            "mobile": _rsa_login_urlenc(self.phone),
+            "isRemberPwd": "true",
+            "password": _rsa_login_urlenc(code), "keyVersion": "",
+            "provinceChanel": "general",
+            "voice_code": "", "appId": "ChinaunicomMobileBusiness",
+            "voiceoff_flag": "1", "timestamp": ts,
+            "requestLoginCurrentAccount": self.phone,
+            "loginCodeLen": "6",
+        }
+        status, body = await self._request(
+            "POST", UNICOM_RANDOM_LOGIN_URL, form=form,
+            headers={"User-Agent": UNICOM_APP_UA,
+                     "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"},
+        )
+        if status != 200:
+            raise CarrierError(f"联通短信登录接口 HTTP {status}")
+        try:
+            result = json.loads(body)
+        except ValueError as err:
+            raise CarrierError(f"联通短信登录响应异常: {body[:120]}") from err
+        code_v = str(result.get("code") or "")
+        token = result.get("token_online")
+        if code_v in ("0", "0000") and token:
+            self._token_online = str(token)
+            return {
+                "phone": self.phone,
+                "password": "",
+                "app_id": self._app_id,
+                "token": str(token),
+            }
+        desc = str(result.get("desc") or result.get("dsc") or "")
+        raise CarrierAuthError("unicom_sms_login_failed", desc or f"code {code_v}")
+
     # ------------------------------------------------------------------ login
 
     async def async_login(self, phone: str, password: str) -> dict[str, Any]:
@@ -279,9 +425,11 @@ class UnicomClient(CarrierClient):
             raise CarrierError(f"联通登录响应异常: {body[:120]}") from err
         code = str(result.get("code") or "")
         if code not in ("0", "0000"):
-            if code in ("4102", "4103", "3102"):
-                raise CarrierAuthError("unicom_invalid_credentials")
-            raise CarrierError(f"联通登录失败: {result.get('desc') or code}")
+            desc = str(result.get("desc") or "")
+            # 2 = 账号或密码错误；4102/4103/3102 = 凭据类失败
+            if code in ("2", "4102", "4103", "3102"):
+                raise CarrierAuthError("unicom_invalid_credentials", desc)
+            raise CarrierError("unicom_login_failed", desc or f"code {code}")
         token = result.get("token_online")
         if not token:
             raise CarrierError("联通登录成功但未返回 token_online")
@@ -338,8 +486,8 @@ class UnicomClient(CarrierClient):
 
     async def async_fetch(self) -> dict[str, Any]:
         data = empty_data("unicom", self.phone)
-        if not self._password:
-            raise CarrierAuthError("缺少服务密码")
+        if not self._password and not self._token_online:
+            raise CarrierAuthError("unicom_credentials_missing")
         if not self._token_online:
             creds = await self.async_login(self.phone, self._password)
             self._token_online = creds["token"]

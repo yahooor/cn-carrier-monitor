@@ -20,6 +20,7 @@ import aiohttp
 from ..const import (
     TELECOM_CLIENT_TYPE,
     TELECOM_LOGIN_URL,
+    TELECOM_LOGIN_V2_HOSTS,
     TELECOM_QUERY_URL,
     TELECOM_SHOP_ID,
     TELECOM_SOURCE,
@@ -46,6 +47,9 @@ RSA_PUB_B64 = (
     "PMpq0/XKBO8lYhN/gwIDAQAB"
 )
 
+# Pocket-Carrier 新一代接口（appgologinsz，同一把 1024 位公钥）
+RSA_PUB_B64_V2 = RSA_PUB_B64
+
 LOGIN_ERROR_KEYS = {
     "3005": "telecom_need_captcha",
     "3006": "telecom_device_untrusted",
@@ -53,6 +57,10 @@ LOGIN_ERROR_KEYS = {
     "3008": "telecom_account_locked",
     "3009": "telecom_password_locked",
 }
+
+# 会话失效判定（Pocket-Carrier 验证：仅登录态类 code/关键词，避免业务提示误杀）
+AUTH_EXPIRED_CODES = ("1001", "2001", "9999", "X201", "X110")
+AUTH_EXPIRED_HINTS = ("token", "重新登录", "鉴权失败", "未登录", "登录已失效", "凭证", "会话")
 
 KB = 1024.0
 
@@ -81,6 +89,12 @@ class TelecomClient(CarrierClient):
         self._token = str(data.get("token") or "")
         self._province_code = str(data.get("province_code") or "")
         self._city_code = str(data.get("city_code") or "")
+        # 短信登录（v2 接口族）运行态：uid 按号码确定性生成，避免跨步骤不一致触发 121
+        import hashlib as _hashlib
+
+        self._uid = _hashlib.md5(f"CT_IOS_11_{self.phone}".encode()).hexdigest()
+        self._key = ""
+        self._isct = "0"
         self._headers = {
             "Accept": "application/json",
             "Content-Type": "application/json; charset=UTF-8",
@@ -123,6 +137,159 @@ class TelecomClient(CarrierClient):
             },
         }
 
+    async def async_login_sms_send(self) -> bool:
+        """电信短信验证码下发（自动过滑块，Pocket-Carrier 方案的纯 Python 移植）。
+
+        滑块缺口定位改用 PIL+朴素灰度对比，不依赖 numpy。
+        """
+        # step1: 预取 key
+        p1 = {
+            "deviceUid": self._uid, "imsi": "", "key": self._key,
+            "payType": "", "phoneNum": caesar(self.phone), "salesProdId": "",
+            "scene": "55", "signSignatureString": "", "validationCode": "",
+        }
+        _hdr, data1 = await self._login_v2("getLoginRandomCode", p1)
+        if data1.get("key"):
+            self._key = data1["key"]
+        if data1.get("isChinatelecom") is not None:
+            self._isct = str(data1["isChinatelecom"])
+
+        import base64 as _b64
+        import io as _io
+
+        for _attempt in range(5):
+            p2 = {
+                "account": caesar(self.phone), "clientType": "1",
+                "deviceUid": caesar(self._uid), "scene": "1",
+            }
+            _hdr, d = await self._login_v2("getSliderVerificationPicture", p2)
+            bg = d.get("backgroundImg") or d.get("bigImg")
+            slider = d.get("sliderImg") or d.get("smallImg")
+            if not bg or not slider or not d.get("key") or not d.get("extra"):
+                _LOGGER.debug("滑块图不完整: keys=%s", sorted(d.keys()))
+                continue
+            try:
+                hx, pw, bw = _locate_notch(bg, slider)
+            except Exception as err:  # noqa: BLE001 - image decode failure
+                _LOGGER.debug("滑块图解析失败: %s", err)
+                continue
+            dist = hx / (bw - pw)
+            kb = _b64.b64decode(d["extra"])
+            st = int(__import__("time").time() * 1000)
+            n = 15
+            track = "%".join(f"{(hx * i / n) / (bw - pw):.3f}#0.000#{st + i * 40}"
+                             for i in range(1, n + 1))
+            from .crypto import aes_ecb_encrypt_b64
+            vp = {
+                "account": caesar(self.phone), "clientType": "1",
+                "deviceUid": caesar(self._uid),
+                "distance": aes_ecb_encrypt_b64("%.4f" % dist, kb),
+                "endTime": aes_ecb_encrypt_b64("%d" % (st + 600), kb),
+                "startTime": aes_ecb_encrypt_b64("%d" % st, kb),
+                "key": d["key"],
+                "scene": "1", "shopId": "20002",
+                "slidingTrack": aes_ecb_encrypt_b64(track, kb),
+            }
+            _hdr, j = await self._login_v2("verificationSliderPicture", vp)
+            sign = j.get("signSignatureString")
+            if sign:
+                p3 = {
+                    "deviceUid": self._uid, "imsi": "", "key": self._key,
+                    "payType": "", "phoneNum": caesar(self.phone), "salesProdId": "",
+                    "scene": "55", "signSignatureString": sign, "validationCode": "",
+                }
+                _hdr3, data3 = await self._login_v2("getLoginRandomCode", p3)
+                if data3.get("key"):
+                    self._key = data3["key"]
+                if data3.get("isChinatelecom") is not None:
+                    self._isct = str(data3["isChinatelecom"])
+                code = str(_hdr3.get("resultCode") or "")
+                desc = str(_hdr3.get("resultDesc") or "")
+                if code in ("0", "0000") or "成功" in desc or "60s" in desc or "重复获取" in desc:
+                    return True
+            await __import__("asyncio").sleep(0.5)
+        raise CarrierError(
+            "telecom_sms_send_failed",
+            f"自动过滑块或下发短信失败(尝试{_attempt + 1}轮)，可改用服务密码登录",
+        )
+
+    async def async_login_sms_submit(self, code: str) -> dict[str, Any]:
+        """电信短信验证码登录（loginType=2）。"""
+        import base64 as _b64
+        import time as _time
+
+        ts = _time.strftime("%Y%m%d%H%M%S")
+        pad = lambda s, n: (s or "")[:n].ljust(n, "$")  # noqa: E731
+        model_prefix = "iPhone 11"[:10].ljust(10, " ")
+        plain = (model_prefix + "16.1." + self._uid[:12]
+                 + self.phone[:11] + ts[:14] + pad(code, 6)
+                 + pad("0", 4) + pad("0.000000", 2))
+        cipher = _b64.b64encode(
+            __import__("cryptography.hazmat.primitives.serialization", fromlist=["load_der_public_key"])
+            .load_der_public_key(__import__("base64").b64decode(RSA_PUB_B64_V2))
+            .encrypt(plain.encode(), __import__("cryptography.hazmat.primitives.asymmetric.padding", fromlist=["PKCS1v15"]).PKCS1v15())
+        ).decode()
+        fd = {
+            "accountType": "",
+            "authentication": _b64.b64encode(caesar(code).encode()).decode(),
+            "clientType": "1", "deviceUid": self._uid,
+            "isChinatelecom": self._isct or "1",
+            "loginAuthCipherAsymmertric": cipher, "loginType": "2",
+            "phoneNum": caesar(self.phone), "signSignatureString": "",
+            "systemVersion": "16.1.1",
+        }
+        hdr, data = await self._login_v2(
+            "userLoginNormal", fd,
+            hdr_extra={"userLoginName": caesar(self.phone), "timestamp": ts},
+        )
+        login_result = (data or {}).get("loginSuccessResult") or {}
+        token = login_result.get("token")
+        if not token:
+            desc = str((data or {}).get("loginFailResult") or {}).get("reason") or hdr.get("resultDesc") or "登录未成功"
+            raise CarrierAuthError("telecom_sms_login_failed", str(desc))
+        return {
+            "phone": self.phone,
+            "password": "",
+            "token": token,
+            "province_code": str(login_result.get("provinceCode") or ""),
+            "city_code": str(login_result.get("cityCode") or ""),
+        }
+
+    async def _login_v2(self, code: str, field_data: dict, hdr_extra: dict | None = None):
+        """新一代登录族接口（appgologinsz.189.cn，source=120002）。"""
+        import time as _time
+
+        hdr = {
+            "broadAccount": "", "broadToken": "", "fixedLineAccount": "",
+            "fixedLineToken": "", "provinceCode": "", "code": code,
+            "source": "120002", "sourcePassword": "TiqmIZ",
+            "userLoginName": "", "clientType": "#13.4.0#channel50#iPhone 11 Pro Max#",
+            "token": "", "timestamp": _time.strftime("%Y%m%d%H%M%S"), "shopId": "20004",
+        }
+        if hdr_extra:
+            hdr.update(hdr_extra)
+        body = {"headerInfos": hdr, "content": {"attach": "iPhone", "fieldData": field_data}}
+        import json as _json
+
+        last_err: Exception | None = None
+        for host in TELECOM_LOGIN_V2_HOSTS:
+            try:
+                status, resp = await self._request(
+                    "POST", f"{host}/login/client/{code}", json_body=body,
+                    headers=self._headers, timeout=25,
+                )
+            except CarrierError as err:
+                _LOGGER.debug("v2 host %s 不可达，尝试下一个: %s", host, err)
+                last_err = err
+                continue
+            try:
+                result = _json.loads(resp)
+            except ValueError as err:
+                raise CarrierError(f"登录接口响应异常: {resp[:120]}") from err
+            rd = result.get("responseData") or {}
+            return rd, rd.get("data") or {}
+        raise CarrierError(f"登录接口不可达: {last_err}")
+
     async def async_login(self, phone: str, password: str) -> dict[str, Any]:
         """Login with the service password; returns credentials to persist."""
         if not phone or not password:
@@ -148,8 +315,9 @@ class TelecomClient(CarrierClient):
             if code in LOGIN_ERROR_KEYS:
                 raise CarrierAuthError(LOGIN_ERROR_KEYS[code])
             fail = (resp_data.get("data") or {}).get("loginFailResult") or {}
-            reason = fail.get("reason") or resp_data.get("resultDesc") or code
-            raise CarrierError(f"电信登录失败: {reason}")
+            reason = str(fail.get("reason") or resp_data.get("resultDesc") or code)
+            # 服务端明确拒绝（含"手机号或密码有误"）→ 归类为凭据错误
+            raise CarrierAuthError("telecom_invalid_credentials", reason)
         login_result = (resp_data.get("data") or {}).get("loginSuccessResult") or {}
         token = login_result.get("token")
         if not token:
@@ -203,8 +371,8 @@ class TelecomClient(CarrierClient):
 
     async def async_fetch(self) -> dict[str, Any]:
         data = empty_data("telecom", self.phone)
-        if not self._password:
-            raise CarrierAuthError("缺少服务密码")
+        if not self._password and not self._token:
+            raise CarrierAuthError("telecom_credentials_missing")
         if not self._token:
             creds = await self.async_login(self.phone, self._password)
             self._token = creds["token"]
@@ -214,7 +382,9 @@ class TelecomClient(CarrierClient):
         result = await self._qry_important_data()
         resp_data = result.get("responseData") or {}
         if resp_data.get("resultCode") != "0000" or not resp_data.get("data"):
-            # token may have expired — re-login once and retry
+            # token may have expired — re-login once and retry (password mode only)
+            if not self._password:
+                raise CarrierAuthError("telecom_session_expired", "短信登录会话已失效，请重新验证")
             _LOGGER.debug("电信查询失败，尝试重新登录: %s", str(result)[:200])
             creds = await self.async_login(self.phone, self._password)
             self._token = creds["token"]
@@ -223,7 +393,7 @@ class TelecomClient(CarrierClient):
             result = await self._qry_important_data()
             resp_data = result.get("responseData") or {}
             if resp_data.get("resultCode") != "0000" or not resp_data.get("data"):
-                raise CarrierAuthError("电信查询失败，请重新登录")
+                raise CarrierAuthError("telecom_session_expired", "查询失败，请重新登录")
 
         self._parse_summary(resp_data["data"], data)
         return finish(data)
@@ -334,3 +504,43 @@ def _flow_str_to_kb_gb(size_str: str) -> float:
     if not m:
         return 0.0
     return round(float(m.group(1)) * units[m.group(2)], 2)
+
+
+def _locate_notch(bg_b64: str, piece_b64: str) -> tuple[int, int, int]:
+    """滑块缺口定位（Pocket-Carrier locate_notch 的纯 PIL 实现）。
+
+    缺口在背景图上是暗色凹槽：取滑块 mask 覆盖区域平均亮度最低的 x。
+    y 在原图 y0 附近 ±8px 搜索。返回 (x, piece_width, bg_width)。
+    """
+    import base64 as b64
+    import io as _io
+
+    from PIL import Image
+
+    bg = Image.open(_io.BytesIO(b64.b64decode(bg_b64))).convert("L")
+    pc = Image.open(_io.BytesIO(b64.b64decode(piece_b64))).convert("RGBA")
+    bg_w, bg_h = bg.size
+    mask = pc.split()[3].point(lambda a: 255 if a > 128 else 0)
+    bbox = mask.getbbox()
+    if not bbox:
+        raise ValueError("slider mask empty")
+    x0, y0, _x1, _y1 = bbox
+    m = mask.crop(bbox)
+    pw, ph = m.size
+    mask_px = [(xx, yy) for yy in range(0, ph, 2) for xx in range(0, pw, 2)
+               if m.getpixel((xx, yy))]
+    if not mask_px:
+        raise ValueError("slider mask has no opaque pixels")
+    bg_px = bg.load()
+    best_x, best_score = -1, float("-inf")
+    for y in range(max(0, y0 - 8), min(bg_h - ph, y0 + 8) + 1):
+        for x in range(0, bg_w - pw + 1, 2):
+            total = 0
+            for xx, yy in mask_px:
+                total += bg_px[x + xx, y + yy]
+            score = -total / len(mask_px)  # darker wins
+            if score > best_score:
+                best_x, best_score = x, score
+    if best_x < 0:
+        raise ValueError("notch not found")
+    return best_x, pw, bg_w

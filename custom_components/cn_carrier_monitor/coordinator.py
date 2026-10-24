@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import logging
+
+import aiohttp
 from datetime import timedelta
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
-from homeassistant.helpers.aiohttp_client import async_create_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import CarrierAuthError, CarrierError, create_client
@@ -29,10 +30,12 @@ class CarrierDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             minutes = max(int(minutes), 5)
         except (TypeError, ValueError):
             minutes = DEFAULT_INTERVAL
-        # 每个账号独立会话，避免 Cookie 串号
-        self.session = async_create_clientsession(
-            hass, auto_cleanup=False, verify_ssl=True
-        )
+        # 每个账号独立会话，避免 Cookie 串号；强制 IPv4（运营商域名常返回
+        # IPv6 优先且内网无 v6 出口，DNS 也会偶发超时）
+        import socket as _socket
+
+        connector = aiohttp.TCPConnector(family=_socket.AF_INET, ssl=True)
+        self.session = aiohttp.ClientSession(connector=connector)
         self.client = create_client(self.carrier, self.session, dict(entry.data))
         super().__init__(
             hass,

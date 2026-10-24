@@ -39,7 +39,9 @@ CONF_CITY_CODE = "city_code"
 CONF_APP_ID = "app_id"              # unicom device-stable appId
 
 AUTH_TELECOM_PASSWORD = "password"
+AUTH_TELECOM_SMS = "sms"
 AUTH_UNICOM_PASSWORD = "password"
+AUTH_UNICOM_SMS = "sms"
 AUTH_UNICOM_OPENID = "openid"
 AUTH_MOBILE_SMS = "sms"
 AUTH_MOBILE_PASSWORD = "password"
@@ -50,6 +52,13 @@ DEFAULT_INTERVAL = 60  # minutes
 
 # ---------------------------------------------------------------- endpoints: telecom
 TELECOM_LOGIN_URL = "https://appgologin.189.cn:9031/login/client/userLoginNormal"
+# Pocket-Carrier 新一代登录族接口（滑块/短信验证码，source=120002）
+TELECOM_LOGIN_V2_URL = "https://appgologinsz.189.cn/login/client"
+# 同集群回退域名（部分内网 DNS 解析不到 sz 域名）
+TELECOM_LOGIN_V2_HOSTS = [
+    "https://appgologinsz.189.cn",
+    "https://appgologin.189.cn:9031",
+]
 TELECOM_QUERY_URL = "https://appfuwu.189.cn:9021/query/qryImportantData"
 TELECOM_FLUX_URL = "https://appfuwu.189.cn:9021/query/userFluxPackage"
 TELECOM_UA = "P216010901"

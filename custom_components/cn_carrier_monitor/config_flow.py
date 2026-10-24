@@ -32,8 +32,10 @@ from .const import (
     AUTH_MOBILE_PASSWORD,
     AUTH_MOBILE_SMS,
     AUTH_TELECOM_PASSWORD,
+    AUTH_TELECOM_SMS,
     AUTH_UNICOM_OPENID,
     AUTH_UNICOM_PASSWORD,
+    AUTH_UNICOM_SMS,
     CARRIER_BROADNET,
     CARRIER_LABELS,
     CARRIER_MOBILE,
@@ -109,7 +111,9 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             mode = entry.data.get(CONF_AUTH_MODE, "")
             route = {
                 (CARRIER_TELECOM, AUTH_TELECOM_PASSWORD): "telecom",
+                (CARRIER_TELECOM, AUTH_TELECOM_SMS): "telecom_sms",
                 (CARRIER_UNICOM, AUTH_UNICOM_PASSWORD): "unicom",
+                (CARRIER_UNICOM, AUTH_UNICOM_SMS): "unicom_sms",
                 (CARRIER_UNICOM, AUTH_UNICOM_OPENID): "unicom_openid",
                 (CARRIER_MOBILE, AUTH_MOBILE_SMS): "mobile_sms",
                 (CARRIER_MOBILE, AUTH_MOBILE_PASSWORD): "mobile_password",
@@ -123,7 +127,7 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             self._carrier = user_input[CONF_CARRIER]
             first_step = {
-                CARRIER_TELECOM: "telecom",
+                CARRIER_TELECOM: "telecom_mode",
                 CARRIER_UNICOM: "unicom_mode",
                 CARRIER_MOBILE: "mobile_mode",
                 CARRIER_BROADNET: "broadnet",
@@ -156,6 +160,7 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def async_step_telecom(self, user_input=None):
         errors = {}
+        placeholders = {}
         if user_input is not None:
             phone = user_input[CONF_PHONE]
             password = user_input[CONF_PASSWORD]
@@ -176,8 +181,10 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 }
             except CarrierAuthError as err:
                 errors["base"] = str(err) if err.args else "telecom_invalid_credentials"
+                placeholders["reason"] = err.detail or ""
             except CarrierError as err:
                 errors["base"] = "cannot_connect"
+                placeholders["reason"] = getattr(err, "detail", "") or str(err)[:120]
                 _LOGGER.warning("电信登录失败: %s", err)
             finally:
                 await session.close()
@@ -194,24 +201,116 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 }
             ),
             errors=errors,
+            description_placeholders=placeholders,
+        )
+
+
+    async def async_step_telecom_mode(self, user_input=None):
+        """电信登录方式选择：短信 / 服务密码。"""
+        if user_input is not None:
+            return await (
+                self.async_step_telecom_sms_phone()
+                if user_input["mode"] == AUTH_TELECOM_SMS
+                else self.async_step_telecom()
+            )
+        return self.async_show_form(
+            step_id="telecom_mode",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("mode", default=AUTH_TELECOM_SMS): vol.In(
+                        {
+                            AUTH_TELECOM_SMS: "短信验证码登录（推荐，自动过滑块）",
+                            AUTH_TELECOM_PASSWORD: "服务密码登录",
+                        }
+                    )
+                }
+            ),
+        )
+
+    async def async_step_telecom_sms_phone(self, user_input=None):
+        """电信短信登录第一步：填手机号并发码（自动过滑块）。"""
+        errors = {}
+        if user_input is not None:
+            self._phone = user_input[CONF_PHONE]
+            session = async_create_clientsession(self.hass)
+            sent = False
+            try:
+                client = TelecomClient(session, {"phone": self._phone})
+                sent = await client.async_login_sms_send()
+            except CarrierAuthError as err:
+                errors["base"] = str(err) if err.args else "telecom_sms_send_failed"
+            except CarrierError as err:
+                errors["base"] = "telecom_sms_send_failed"
+                _LOGGER.warning("电信短信下发失败: %s | %s", err, getattr(err, "detail", ""))
+            finally:
+                await session.close()
+            if sent:
+                return await self.async_step_telecom_sms_code()
+        return self.async_show_form(
+            step_id="telecom_sms_phone",
+            data_schema=vol.Schema(_phone_schema(self._phone)),
+            errors=errors,
+        )
+
+    async def async_step_telecom_sms_code(self, user_input=None):
+        """电信短信登录第二步：输入验证码。"""
+        errors = {}
+        if user_input is not None:
+            code = user_input["code"].strip()
+            session = async_create_clientsession(self.hass)
+            data = {}
+            try:
+                client = TelecomClient(session, {"phone": self._phone})
+                creds = await client.async_login_sms_submit(code)
+                data = {
+                    CONF_CARRIER: CARRIER_TELECOM,
+                    CONF_AUTH_MODE: AUTH_TELECOM_SMS,
+                    CONF_PHONE: self._phone,
+                    CONF_PASSWORD: "",
+                    CONF_TOKEN: creds["token"],
+                    CONF_PROVINCE_CODE: creds["province_code"],
+                    CONF_CITY_CODE: creds["city_code"],
+                    CONF_INTERVAL: int(user_input.get(CONF_INTERVAL, DEFAULT_INTERVAL)),
+                }
+            except CarrierAuthError as err:
+                errors["base"] = str(err) if err.args else "telecom_sms_login_failed"
+                if getattr(err, "detail", ""):
+                    _LOGGER.warning("电信短信登录失败: %s", err.detail)
+            except CarrierError as err:
+                errors["base"] = "cannot_connect"
+                _LOGGER.warning("电信短信登录异常: %s", err)
+            finally:
+                await session.close()
+            if not errors:
+                return await self._persist(data)
+        return self.async_show_form(
+            step_id="telecom_sms_code",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("code"): vol.All(str, vol.Match(r"^\d{4,8}$")),
+                    **_interval_schema(),
+                }
+            ),
+            errors=errors,
         )
 
     # ------------------------------------------------------------------ unicom
 
     async def async_step_unicom_mode(self, user_input=None):
         if user_input is not None:
-            return await (
-                self.async_step_unicom()
-                if user_input["mode"] == AUTH_UNICOM_PASSWORD
-                else self.async_step_unicom_openid()
-            )
+            return await {
+                AUTH_UNICOM_SMS: self.async_step_unicom_sms,
+                AUTH_UNICOM_PASSWORD: self.async_step_unicom,
+                AUTH_UNICOM_OPENID: self.async_step_unicom_openid,
+            }[user_input["mode"]]()
         return self.async_show_form(
             step_id="unicom_mode",
             data_schema=vol.Schema(
                 {
-                    vol.Required("mode", default=AUTH_UNICOM_PASSWORD): vol.In(
+                    vol.Required("mode", default=AUTH_UNICOM_SMS): vol.In(
                         {
-                            AUTH_UNICOM_PASSWORD: "服务密码登录（推荐）",
+                            AUTH_UNICOM_SMS: "短信验证码登录（推荐）",
+                            AUTH_UNICOM_PASSWORD: "服务密码登录",
                             AUTH_UNICOM_OPENID: "小程序 openid 导入",
                         }
                     )
@@ -221,6 +320,7 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def async_step_unicom(self, user_input=None):
         errors = {}
+        placeholders = {}
         data = {}
         if user_input is not None:
             phone = user_input[CONF_PHONE]
@@ -238,10 +338,12 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_TOKEN: creds["token"],
                     CONF_INTERVAL: int(user_input.get(CONF_INTERVAL, DEFAULT_INTERVAL)),
                 }
-            except CarrierAuthError:
-                errors["base"] = "unicom_invalid_credentials"
+            except CarrierAuthError as err:
+                errors["base"] = str(err) if err.args else "unicom_invalid_credentials"
+                placeholders["reason"] = err.detail or ""
             except CarrierError as err:
-                errors["base"] = "cannot_connect"
+                errors["base"] = "unicom_login_failed" if getattr(err, "detail", "") else "cannot_connect"
+                placeholders["reason"] = getattr(err, "detail", "") or str(err)[:120]
                 _LOGGER.warning("联通登录失败: %s", err)
             finally:
                 await session.close()
@@ -257,6 +359,7 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 }
             ),
             errors=errors,
+            description_placeholders=placeholders,
         )
 
     async def async_step_unicom_openid(self, user_input=None):
@@ -298,6 +401,82 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 }
             ),
             errors=errors,
+        )
+
+
+    async def async_step_unicom_sms(self, user_input=None):
+        """联通短信登录：手机号 + （可选）H5 滑块 resultToken。"""
+        errors = {}
+        placeholders = {}
+        if user_input is not None:
+            self._phone = user_input[CONF_PHONE]
+            result_token = user_input.get("result_token", "").strip()
+            session = async_create_clientsession(self.hass)
+            hint = ""
+            try:
+                client = UnicomClient(session, {"phone": self._phone})
+                if result_token:
+                    await client.async_sms_send_with_token(result_token)
+                    hint = "短信验证码已下发，请查收后继续"
+                else:
+                    hint = await client.async_sms_trigger()
+                return await self.async_step_unicom_sms_code(hint)
+            except CarrierError as err:
+                errors["base"] = "unicom_sms_send_failed"
+                placeholders["reason"] = getattr(err, "detail", "") or str(err)[:120]
+                _LOGGER.warning("联通短信下发失败: %s", err)
+            finally:
+                await session.close()
+        return self.async_show_form(
+            step_id="unicom_sms",
+            data_schema=vol.Schema(
+                {
+                    **_phone_schema(self._phone),
+                    vol.Optional("result_token", default=""): str,
+                }
+            ),
+            errors=errors,
+            description_placeholders=placeholders,
+        )
+
+    async def async_step_unicom_sms_code(self, hint="", user_input=None):
+        """联通短信登录第二步：输入验证码。"""
+        errors = {}
+        if user_input is not None:
+            code = user_input["code"].strip()
+            session = async_create_clientsession(self.hass)
+            data = {}
+            try:
+                client = UnicomClient(session, {"phone": self._phone})
+                creds = await client.async_sms_login(code)
+                data = {
+                    CONF_CARRIER: CARRIER_UNICOM,
+                    CONF_AUTH_MODE: AUTH_UNICOM_SMS,
+                    CONF_PHONE: self._phone,
+                    CONF_PASSWORD: "",
+                    CONF_APP_ID: creds["app_id"],
+                    CONF_TOKEN: creds["token"],
+                    CONF_INTERVAL: int(user_input.get(CONF_INTERVAL, DEFAULT_INTERVAL)),
+                }
+            except CarrierAuthError as err:
+                errors["base"] = str(err) if err.args else "unicom_sms_login_failed"
+            except CarrierError as err:
+                errors["base"] = "cannot_connect"
+                _LOGGER.warning("联通短信登录异常: %s", err)
+            finally:
+                await session.close()
+            if not errors:
+                return await self._persist(data)
+        return self.async_show_form(
+            step_id="unicom_sms_code",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("code"): vol.All(str, vol.Match(r"^\d{4,8}$")),
+                    **_interval_schema(),
+                }
+            ),
+            errors=errors,
+            description_placeholders={"hint": hint},
         )
 
     # ------------------------------------------------------------------ mobile

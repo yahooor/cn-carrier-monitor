@@ -21,7 +21,7 @@
       },
       "unicom_mode": {
         "title": "中国联通",
-        "description": "选择登录方式。",
+        "description": "选择登录方式。短信登录需通过联通官方滑块（手机 H5 或粘贴 resultToken）。",
         "data": {
           "mode": "登录方式"
         }
@@ -93,6 +93,44 @@
           "cookies": "Cookie（cURL 中已包含则留空）",
           "interval": "刷新间隔（分钟）"
         }
+      },
+      "telecom_mode": {
+        "title": "中国电信",
+        "description": "选择登录方式。",
+        "data": {
+          "mode": "登录方式"
+        }
+      },
+      "telecom_sms_phone": {
+        "title": "中国电信（短信登录）",
+        "description": "输入手机号后提交，系统自动完成官方滑块并下发短信验证码。",
+        "data": {
+          "phone": "手机号"
+        }
+      },
+      "telecom_sms_code": {
+        "title": "中国电信（短信登录）",
+        "description": "请输入收到的短信验证码。",
+        "data": {
+          "code": "短信验证码",
+          "interval": "刷新间隔（分钟）"
+        }
+      },
+      "unicom_sms": {
+        "title": "中国联通（短信登录）",
+        "description": "提交后尝试下发短信；若服务端要求滑块验证，请在手机打开 https://m.client.10010.com/login-web 完成验证，或把页面返回的 resultToken 粘贴到下方直接下发。{reason}",
+        "data": {
+          "phone": "手机号",
+          "result_token": "H5 滑块 resultToken（可选）"
+        }
+      },
+      "unicom_sms_code": {
+        "title": "中国联通（短信登录）",
+        "description": "{hint}",
+        "data": {
+          "code": "短信验证码",
+          "interval": "刷新间隔（分钟）"
+        }
       }
     },
     "error": {
@@ -102,7 +140,7 @@
       "telecom_too_frequent": "登录过于频繁，请稍后再试",
       "telecom_account_locked": "账号被锁定，请通过官方渠道解锁",
       "telecom_password_locked": "服务密码被锁定，请通过官方渠道重置",
-      "telecom_invalid_credentials": "手机号或服务密码错误",
+      "telecom_invalid_credentials": "手机号或服务密码错误（{reason}）",
       "unicom_invalid_credentials": "手机号或服务密码错误",
       "unicom_openid_invalid": "openid 无效或已失效，请重新抓取",
       "unicom_session_expired": "联通会话已失效",
@@ -115,7 +153,15 @@
       "mobile_session_expired": "登录会话已失效，请重新登录",
       "broadnet_import_invalid": "无法解析粘贴内容，请确认复制的是 cURL 或完整 URL",
       "broadnet_session_expired": "广电会话已失效，请重新登录并复制新请求",
-      "broadnet_query_failed": "广电查询失败，请确认会话有效后重试"
+      "broadnet_query_failed": "广电查询失败，请确认会话有效后重试",
+      "unicom_login_failed": "联通登录被拒绝：{reason}",
+      "telecom_sms_send_failed": "短信下发失败（自动过滑块未成功），可改用服务密码登录",
+      "telecom_sms_login_failed": "短信验证码错误或已过期，请重试",
+      "telecom_session_expired": "登录会话已失效，请重新登录",
+      "telecom_credentials_missing": "缺少登录凭证，请重新配置",
+      "unicom_sms_send_failed": "短信下发失败：{reason}",
+      "unicom_sms_login_failed": "短信验证码错误或已过期，请重试",
+      "unicom_credentials_missing": "缺少登录凭证，请重新配置"
     },
     "abort": {
       "already_configured": "该账号已配置",

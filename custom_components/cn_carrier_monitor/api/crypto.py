@@ -76,6 +76,15 @@ def decrypt_payload(text: str, key: bytes, iv: bytes) -> str:
     return text
 
 
+def aes_ecb_encrypt_b64(text: str, key: bytes) -> str:
+    """AES-ECB with PKCS7 padding → base64 (telecom slider params)."""
+    padder = PKCS7(128).padder()
+    padded = padder.update(text.encode()) + padder.finalize()
+    cipher = Cipher(algorithms.AES(key), modes.ECB())
+    enc = cipher.encryptor()
+    return base64.b64encode(enc.update(padded) + enc.finalize()).decode("ascii")
+
+
 def rsa_encrypt_b64(public_key_b64: str, text: str, *, der: bool = True) -> str:
     """RSA PKCS#1 v1.5 encrypt, returning base64. ``der=True`` for raw SPKI b64."""
     key_bytes = b64_decode(public_key_b64) if der else public_key_b64.encode()

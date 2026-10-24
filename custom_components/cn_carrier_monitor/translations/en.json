@@ -93,6 +93,44 @@
           "cookies": "Cookie (leave empty if included in cURL)",
           "interval": "Refresh interval (minutes)"
         }
+      },
+      "telecom_mode": {
+        "title": "China Telecom",
+        "description": "Choose a login method.",
+        "data": {
+          "mode": "Login method"
+        }
+      },
+      "telecom_sms_phone": {
+        "title": "China Telecom (SMS)",
+        "description": "Submit the phone number; the slider CAPTCHA is solved automatically and an SMS code is sent.",
+        "data": {
+          "phone": "Phone number"
+        }
+      },
+      "telecom_sms_code": {
+        "title": "China Telecom (SMS)",
+        "description": "Enter the SMS verification code.",
+        "data": {
+          "code": "SMS code",
+          "interval": "Refresh interval (minutes)"
+        }
+      },
+      "unicom_sms": {
+        "title": "China Unicom (SMS)",
+        "description": "An SMS code is requested on submit. If the server requires a slider CAPTCHA, open https://m.client.10010.com/login-web on your phone, or paste the resultToken below. {reason}",
+        "data": {
+          "phone": "Phone number",
+          "result_token": "H5 slider resultToken (optional)"
+        }
+      },
+      "unicom_sms_code": {
+        "title": "China Unicom (SMS)",
+        "description": "{hint}",
+        "data": {
+          "code": "SMS code",
+          "interval": "Refresh interval (minutes)"
+        }
       }
     },
     "error": {
@@ -102,7 +140,7 @@
       "telecom_too_frequent": "Too many attempts, retry later",
       "telecom_account_locked": "Account locked, unlock via official channels",
       "telecom_password_locked": "Service password locked, reset via official channels",
-      "telecom_invalid_credentials": "Wrong phone number or service password",
+      "telecom_invalid_credentials": "Wrong phone number or service password（{reason}） ({reason})",
       "unicom_invalid_credentials": "Wrong phone number or service password",
       "unicom_openid_invalid": "openid is invalid or expired",
       "unicom_session_expired": "Unicom session expired",
@@ -115,7 +153,15 @@
       "mobile_session_expired": "Login session expired, please sign in again",
       "broadnet_import_invalid": "Could not parse the paste; expected cURL or a full URL",
       "broadnet_session_expired": "Broadnet session expired, log in again and copy a fresh request",
-      "broadnet_query_failed": "Broadnet query failed, verify the session and retry"
+      "broadnet_query_failed": "Broadnet query failed, verify the session and retry",
+      "unicom_login_failed": "Unicom rejected the login: {reason}",
+      "telecom_sms_send_failed": "Failed to send the SMS code; try password login instead",
+      "telecom_sms_login_failed": "Wrong or expired SMS code",
+      "telecom_session_expired": "Session expired, please sign in again",
+      "telecom_credentials_missing": "Missing credentials, reconfigure the account",
+      "unicom_sms_send_failed": "Failed to send the SMS code: {reason}",
+      "unicom_sms_login_failed": "Wrong or expired SMS code",
+      "unicom_credentials_missing": "Missing credentials, reconfigure the account"
     },
     "abort": {
       "already_configured": "This account is already configured",
