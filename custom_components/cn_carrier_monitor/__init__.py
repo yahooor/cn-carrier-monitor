@@ -7,11 +7,11 @@ from __future__ import annotations
 
 import logging
 
+import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
-import voluptuous as vol
 
 from .const import DOMAIN, PLATFORMS, SERVICE_REFRESH
 from .coordinator import CarrierDataUpdateCoordinator

@@ -25,8 +25,8 @@ from ..const import REQUEST_TIMEOUT
 from .base import (
     CarrierAuthError,
     CarrierClient,
-    empty_data,
     CarrierError,
+    empty_data,
     finish,
     to_float,
     usage_block,

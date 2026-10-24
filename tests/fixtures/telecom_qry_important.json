@@ -1,0 +1,76 @@
+{
+ "headerInfos": {
+  "code": "0000",
+  "reason": "操作成功"
+ },
+ "responseData": {
+  "resultCode": "0000",
+  "data": {
+   "flowInfo": {
+    "totalAmount": {
+     "used": 512000,
+     "balance": 1024000,
+     "over": 0
+    },
+    "commonFlow": {
+     "used": 409600,
+     "balance": 921600
+    },
+    "specialAmount": {
+     "used": 102400,
+     "balance": 102400
+    },
+    "flowList": [
+     {
+      "title": "主套餐通用流量",
+      "leftTitle": "已用400MB",
+      "leftTitleHh": "400MB",
+      "rightTitle": "剩余900MB",
+      "rightTitleHh": "900MB"
+     },
+     {
+      "title": "定向流量",
+      "leftTitle": "超出100MB",
+      "leftTitleHh": "100MB",
+      "rightTitle": "",
+      "rightTitleHh": "",
+      "rightTitleEnd": "100MB/1GB"
+     },
+     {
+      "title": "达量降速",
+      "leftTitle": "已用2.5GB",
+      "leftTitleHh": "2.5GB",
+      "rightTitle": "20GB后降速"
+     },
+     {
+      "title": "短信包",
+      "leftTitle": "已用5条",
+      "leftTitleHh": "5条",
+      "rightTitle": "剩余95条",
+      "rightTitleHh": "95条"
+     }
+    ]
+   },
+   "voiceInfo": {
+    "voiceDataInfo": {
+     "used": 50,
+     "balance": 250,
+     "total": 300
+    }
+   },
+   "smsInfo": {},
+   "balanceInfo": {
+    "indexBalanceDataInfo": {
+     "balance": "123.45",
+     "arrear": "0.00"
+    },
+    "phoneBillRegion": {
+     "subTitleHh": "45.60元"
+    }
+   },
+   "integralInfo": {
+    "integral": "1234"
+   }
+  }
+ }
+}

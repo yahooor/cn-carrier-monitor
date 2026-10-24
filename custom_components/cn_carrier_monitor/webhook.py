@@ -15,13 +15,12 @@ from __future__ import annotations
 import logging
 
 import aiohttp
+import voluptuous as vol
 from aiohttp.web import Request
-
 from homeassistant.components import webhook
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv
-import voluptuous as vol
 
 from .api import TelecomClient, UnicomClient
 from .const import CARRIER_TELECOM, CARRIER_UNICOM, CONF_AUTH_MODE, DOMAIN
@@ -88,7 +87,17 @@ async def async_handle_webhook(
 
     code = str(payload["code"]).strip()
     phone = str(payload["phone"]).strip()
+    # 可选共享密钥：条目 options/data 设置 webhook_secret 后，请求必须带
+    # 同值 X-Secret 头（或 body.secret）
+    provided_secret = str(request.headers.get("X-Secret") or payload.get("secret") or "")
     candidates = _sms_entries(hass)
+    if phone:
+        candidates = [e for e in candidates if e.data.get("phone") == phone]
+    if candidates:
+        expected = (candidates[0].options.get("webhook_secret")
+                    or candidates[0].data.get("webhook_secret") or "")
+        if expected and provided_secret != expected:
+            return webhook.json_response({"ok": False, "error": "bad_secret"}, status=403)
     if phone:
         candidates = [e for e in candidates if e.data.get("phone") == phone]
     if not candidates:

@@ -125,3 +125,4 @@ ATTR_PHONE = "phone"
 ATTR_CARRIER = "carrier"
 
 SERVICE_REFRESH = "refresh"
+CONF_WEBHOOK_SECRET = "webhook_secret"

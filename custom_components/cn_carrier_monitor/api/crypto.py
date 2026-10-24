@@ -156,10 +156,6 @@ def parse_curl(source: str) -> dict[str, str]:
         "-s", "-k", "-l", "-L", "--insecure", "--compressed", "--location",
         "-v", "--silent", "--http1.1", "--http2", "-4", "-6",
     }
-    value_flags = {
-        "-h", "--header", "-x", "--request", "-d", "--data", "--data-raw",
-        "--data-binary", "--data-ascii", "--data-urlencode", "-a", "-b",
-    }
     i = 0
     while i < len(tokens):
         token = tokens[i]

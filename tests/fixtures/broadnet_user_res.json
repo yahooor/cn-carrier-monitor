@@ -1,0 +1,40 @@
+{
+ "status": "000000",
+ "data": {
+  "respCode": "000000",
+  "intfResultBean": {
+   "userResList": [
+    {
+     "busiType": "5",
+     "discntName": "通用流量",
+     "balance": "20480",
+     "highFee": "51200"
+    },
+    {
+     "busiType": "5",
+     "discntName": "定向流量",
+     "balance": "10240",
+     "highFee": "10240"
+    },
+    {
+     "busiType": "5",
+     "discntName": "不限量流量",
+     "balance": "不限量",
+     "highFee": "不限量"
+    },
+    {
+     "busiType": "1",
+     "discntName": "通话分钟",
+     "balance": "80",
+     "highFee": "100"
+    },
+    {
+     "busiType": "9",
+     "discntName": "短信包",
+     "balance": "30",
+     "highFee": "100"
+    }
+   ]
+  }
+ }
+}

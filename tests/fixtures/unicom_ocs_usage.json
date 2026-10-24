@@ -1,0 +1,54 @@
+{
+ "unshared": [
+  {
+   "type": "flow",
+   "details": [
+    {
+     "elemType": "3",
+     "addUpItemName": "通用流量",
+     "feePolicyName": "王卡套餐",
+     "use": "2048",
+     "total": "10240",
+     "remain": "8192",
+     "flowType": "1"
+    },
+    {
+     "elemType": "3",
+     "addUpItemName": "定向流量",
+     "use": "1024",
+     "total": "2048",
+     "remain": "1024",
+     "flowType": "2"
+    }
+   ]
+  }
+ ],
+ "resources": [
+  {
+   "type": "Voice",
+   "userResource": 50,
+   "remainResource": 250,
+   "details": [
+    {
+     "elemType": "1",
+     "use": "50",
+     "total": "300",
+     "remain": "250"
+    }
+   ]
+  },
+  {
+   "type": "smsList",
+   "userResource": 5,
+   "remainResource": 95,
+   "details": [
+    {
+     "elemType": "2",
+     "use": "5",
+     "total": "100",
+     "remain": "95"
+    }
+   ]
+  }
+ ]
+}

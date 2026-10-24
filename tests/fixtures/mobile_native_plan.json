@@ -1,0 +1,41 @@
+{
+ "retCode": "000000",
+ "rspBody": {
+  "newPlanRemainQryRes": {
+   "planRemianFlowListRes": {
+    "planRemianFlowRes": [
+     {
+      "flowRemainNum": "8192",
+      "flowUsdNum": "2048",
+      "flowSumNum": "10240",
+      "unit": "03",
+      "mealTypeDesc": "通用流量"
+     },
+     {
+      "flowRemainNum": "1024",
+      "flowUsdNum": "1024",
+      "flowSumNum": "2048",
+      "unit": "03",
+      "flowTypeDesc": "定向流量"
+     },
+     {
+      "flowRemainNum": "512",
+      "flowUsdNum": "256",
+      "flowSumNum": "768",
+      "unit": "02",
+      "mealTypeDesc": "闲时流量"
+     }
+    ]
+   },
+   "planRemianVoiceListRes": {
+    "planRemianVoiceInfoRes": [
+     {
+      "voiceRemainNum": "250",
+      "voiceUsdNum": "50",
+      "voiceSumNum": "300"
+     }
+    ]
+   }
+  }
+ }
+}

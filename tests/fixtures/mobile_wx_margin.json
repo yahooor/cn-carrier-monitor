@@ -1,0 +1,48 @@
+{
+ "data": {
+  "resultData": {
+   "planRemainFlowInfo": {
+    "planRemian": {
+     "usedNum": "1024",
+     "sumNum": "10240",
+     "remainNum": "9216",
+     "unit": "03"
+    },
+    "directionalFlowInfo": {
+     "usedNum": "100",
+     "sumNum": "1024",
+     "remainNum": "924",
+     "unit": "03"
+    },
+    "otherRemian": {
+     "usedNum": "50",
+     "sumNum": "500",
+     "remainNum": "450",
+     "unit": "03"
+    },
+    "totalInfo": {
+     "usedNum": "1124",
+     "sumNum": "11264",
+     "remainNum": "10140",
+     "unit": "03"
+    }
+   },
+   "planRemianVoiceInfo": {
+    "planRemian": {
+     "usedNum": "10",
+     "sumNum": "100",
+     "remainNum": "90",
+     "unit": "01"
+    }
+   },
+   "planRemianMSGInfo": {
+    "notePlanRemian": {
+     "usedNum": "5",
+     "sumNum": "50",
+     "remainNum": "45",
+     "unit": "02"
+    }
+   }
+  }
+ }
+}

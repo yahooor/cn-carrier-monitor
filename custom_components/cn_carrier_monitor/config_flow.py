@@ -52,9 +52,6 @@ from .const import (
     CONF_PASSWORD,
     CONF_PHONE,
     CONF_PROVINCE_CODE,
-    CONF_REQUEST_BODY,
-    CONF_REQUEST_METHOD,
-    CONF_REQUEST_URL,
     CONF_TOKEN,
     DEFAULT_INTERVAL,
     DOMAIN,
@@ -759,7 +756,11 @@ class ChinaCarrierMonitorOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
             CONF_INTERVAL,
             self.config_entry.data.get(CONF_INTERVAL, DEFAULT_INTERVAL),
         )
+        current_secret = self.config_entry.options.get("webhook_secret", "")
         return self.async_show_form(
             step_id="init",
-            data_schema=vol.Schema(_interval_schema(current)),
+            data_schema=vol.Schema({
+                **_interval_schema(current),
+                vol.Optional("webhook_secret", description={"suggested_value": current_secret}): str,
+            }),
         )

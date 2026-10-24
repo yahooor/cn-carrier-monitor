@@ -1,0 +1,7 @@
+{
+ "headerInfos": {
+  "code": "X110",
+  "reason": "登陆用户名、token、clientType或者outTime为空"
+ },
+ "responseData": {}
+}

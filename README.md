@@ -108,6 +108,32 @@ triggers:
          and (state_attr('sensor.xxx_tong_yong_liu_liang_sheng_yu','用量明细').使用率 or '') | replace('%','') | float(0) > 90 }}
 ```
 
+
+## 工程质量（v1.2+）
+
+[![CI](https://github.com/yahooor/cn-carrier-monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/yahooor/cn-carrier-monitor/actions/workflows/ci.yml)
+
+- **契约测试**：`tests/` 以真实响应结构 fixtures 固化四运营商解析契约（42+ 用例，含上线过程中每个 bug 的回归用例）
+- **CI 门禁**：ruff（含 F821 未定义名，历史上 `empty_data` 类事故的机器防线）、pytest、hassfest、HACS 校验
+- **协议基线**：[docs/协议基线.md](docs/协议基线.md)——每个密钥/端点的来源与本环境实证状态、漂移症状与防御
+
+### 限频预算（重要）
+
+| 运营商 | 默认间隔 | 下限 | 说明 |
+|---|---|---|---|
+| 电信 | 30 分钟 | ≥5 分钟 | 密码模式 token 长效；短信 token 一次性短效 |
+| 联通 | 10-30 分钟 | ≥5 分钟 | onLine 保活 + 续期回写 |
+| 移动 | 30 分钟 | ≥5 分钟 | refreshSession 保活顺延 Cookie |
+| 广电 | 60 分钟 | ≥30 分钟 | 会话约 3 天，重放请求勿高频 |
+
+连续失败 ≥5 次自动熔断 15 分钟（保护风控额度），期间实体显示最后一次数据。
+
+### 威胁模型与凭据
+
+- 服务密码/token/cookie 存于 HA 配置条目（`.storage`，随 HA 备份）；HA 本机泄露即泄露，请保证 HA 主机访问安全
+- webhook `cn_carrier_monitor_sms` 默认无鉴权（局域网内使用）；跨网使用时在集成**选项**里设置 `webhook_secret`，请求须带同值 `X-Secret` 头（或 body `secret` 字段）
+- 本集成仅查询个人账号数据；禁止高频轮询（见预算表）与商业用途
+
 ## 已知限制与说明
 
 - 运营商接口均为非公开接口，可能随官方升级而失效；本集成仅查询个人账号数据，请勿高频轮询（默认 60 分钟）。

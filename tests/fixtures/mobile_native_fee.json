@@ -1,0 +1,8 @@
+{
+ "retCode": "000000",
+ "rspBody": {
+  "curFeeTotal": "229.31",
+  "realFee": "18.75",
+  "oweFee": "0.00"
+ }
+}

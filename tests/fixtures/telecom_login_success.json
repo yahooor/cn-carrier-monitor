@@ -1,0 +1,15 @@
+{
+ "responseData": {
+  "resultCode": "0000",
+  "data": {
+   "loginSuccessResult": {
+    "token": "V1.0xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "provinceCode": "600203",
+    "cityCode": "8430800",
+    "provinceName": "湖南",
+    "cityName": "张家界",
+    "userId": "123456789"
+   }
+  }
+ }
+}

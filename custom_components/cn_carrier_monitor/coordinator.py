@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import logging
-
-import aiohttp
 from datetime import timedelta
 from typing import Any
 
+import aiohttp
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
@@ -42,7 +41,24 @@ class CarrierDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             update_interval=timedelta(minutes=minutes),
         )
 
+    # 连续失败断路器：连续 >=5 次失败后熔断 15 分钟（保护运营商风控额度）
+    FAILURE_THRESHOLD = 5
+    CIRCUIT_COOLDOWN = 900.0
+
     async def _async_update_data(self) -> dict[str, Any]:
+        import time as _time
+
+        if (
+            getattr(self, "_fail_streak", 0) >= self.FAILURE_THRESHOLD
+            and _time.time() - getattr(self, "_last_fail_at", 0.0) < self.CIRCUIT_COOLDOWN
+        ):
+            degraded = dict(self.data) if isinstance(self.data, dict) else {}
+            degraded["extra"] = {
+                **(degraded.get("extra") or {}),
+                "circuit_open": True,
+                "fail_streak": self._fail_streak,
+            }
+            return degraded
         try:
             data = await self.client.async_fetch()
         except CarrierAuthError as err:
@@ -61,9 +77,14 @@ class CarrierDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return degraded
             raise ConfigEntryAuthFailed(str(err)) from err
         except CarrierError as err:
+            self._fail_streak = getattr(self, "_fail_streak", 0) + 1
+            self._last_fail_at = _time.time()
             raise UpdateFailed(str(err)) from err
         except Exception as err:  # noqa: BLE001
+            self._fail_streak = getattr(self, "_fail_streak", 0) + 1
+            self._last_fail_at = _time.time()
             raise UpdateFailed(f"查询失败: {err}") from err
+        self._fail_streak = 0
         # 会话滑动续期：把客户端刷新后的凭证（联通 token_online、移动 Cookie 等）
         # 写回配置条目；服务端会话顺延后重启 HA 不丢登录态
         try:
@@ -124,7 +145,6 @@ class CarrierDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if ok:
             from homeassistant.components.persistent_notification import (
                 async_create as pn_create,
-                async_dismiss as pn_dismiss,
             )
 
             pn_create(

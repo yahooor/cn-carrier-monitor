@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 import logging
 import random
-import re
 import time
 import urllib.parse
 from typing import Any
@@ -26,7 +25,6 @@ from ..const import (
     UNICOM_LOGIN_URL,
     UNICOM_MINI_APPID,
     UNICOM_MINI_BALANCE_BROADCAST,
-    UNICOM_MINI_BASE,
     UNICOM_MINI_FLOW_URL,
     UNICOM_MINI_GET_TICKET,
     UNICOM_MINI_GET_TOKEN,
@@ -41,8 +39,8 @@ from ..const import (
 from .base import (
     CarrierAuthError,
     CarrierClient,
-    empty_data,
     CarrierError,
+    empty_data,
     finish,
     to_float,
     usage_block,

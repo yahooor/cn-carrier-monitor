@@ -1,0 +1,20 @@
+{
+ "headerInfos": {
+  "code": "0000",
+  "reason": "操作成功"
+ },
+ "responseData": {
+  "attach": "",
+  "data": {
+   "signSignatureString": "9a9a4be860d0ae65cae1867b2be821b3nakbnd20261024233430",
+   "verificationResultIcon": "https://img.189.cn/appclient/mainversion/120200/PASS.png",
+   "verificationResultTip": "验证成功，正在下发短信验证码",
+   "key": null,
+   "title": null,
+   "backgroundImg": null,
+   "sliderImg": null,
+   "extra": null,
+   "size": null
+  }
+ }
+}

@@ -40,7 +40,6 @@ async def async_setup_entry(
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     coordinator: CarrierDataUpdateCoordinator = hass.data[DOMAIN][entry.entry_id]
-    carrier = entry.data["carrier"]
     entities: list[SensorEntity] = [
         CarrierBalanceSensor(coordinator, entry),
         CarrierMonthCostSensor(coordinator, entry),

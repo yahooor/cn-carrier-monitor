@@ -30,8 +30,8 @@ from ..const import (
 from .base import (
     CarrierAuthError,
     CarrierClient,
-    empty_data,
     CarrierError,
+    empty_data,
     finish,
     to_float,
     to_int,
@@ -156,7 +156,6 @@ class TelecomClient(CarrierClient):
             self._isct = str(data1["isChinatelecom"])
 
         import base64 as _b64
-        import io as _io
 
         for _attempt in range(5):
             p2 = {
@@ -496,19 +495,22 @@ class TelecomClient(CarrierClient):
             used = remain = total = None
             left, right = str(item.get("leftTitle", "")), str(item.get("rightTitle", ""))
             if "已用" in left and "剩余" in right:
-                used = _kb_to_gb(item.get("leftTitleHh"))
-                remain = _kb_to_gb(item.get("rightTitleHh"))
+                used = _flow_str_to_gb(item.get("leftTitleHh"))
+                remain = _flow_str_to_gb(item.get("rightTitleHh"))
                 total = round((used or 0) + (remain or 0), 2)
             elif "超出" in left and "/" in str(item.get("rightTitleEnd", "")):
-                remain = -(_kb_to_gb(item.get("leftTitleHh")) or 0)
-                used = _kb_to_gb(str(item.get("rightTitleEnd", "0/0")).split("/")[1])
+                remain = -(_flow_str_to_gb(item.get("leftTitleHh")) or 0)
+                # 原版语义: use = 已用部分 - 负余额（"100MB/1GB" 左为超出量）
+                used = round(
+                    (_flow_str_to_gb(str(item.get("rightTitleEnd", "0/0")).split("/")[1]) or 0)
+                    - remain, 2)
                 total = round((used or 0) + (remain or 0), 2)
             elif "已用" in left and "降速" in right:
                 import re
 
                 match = re.search(r"(\d+[KMGT]B)", right)
-                total = _flow_str_to_kb_gb(match.group(1)) if match else None
-                used = _kb_to_gb(item.get("leftTitleHh"))
+                total = _flow_str_to_gb(match.group(1)) if match else None
+                used = _flow_str_to_gb(item.get("leftTitleHh"))
                 remain = round((total or 0) - (used or 0), 2)
             else:
                 continue
@@ -519,13 +521,17 @@ class TelecomClient(CarrierClient):
             data["extra"]["flow_items"] = flow_items
 
 
-def _flow_str_to_kb_gb(size_str: str) -> float:
-    """Convert a string like '20GB' to GB."""
-    units = {"KB": 1 / 1024, "MB": 1, "GB": 1, "TB": 1024}
-    m = __import__("re").match(r"([\d.]+)([KMGT]B)", size_str.strip())
-    if not m:
-        return 0.0
-    return round(float(m.group(1)) * units[m.group(2)], 2)
+def _flow_str_to_gb(value: Any) -> float | None:
+    """flowList 值带单位字符串（'400MB'/'2.5GB'）→ GB；纯数字按 KB 处理。"""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    m = __import__("re").match(r"([\d.]+)\s*([KMGT]B)", text)
+    if m:
+        mult = {"KB": 1 / 1024, "MB": 1 / 1024, "GB": 1, "TB": 1024}[m.group(2)]
+        return round(float(m.group(1)) * mult, 2)
+    num = to_float(text)
+    return _kb_to_gb(num) if num is not None else None
 
 
 def _locate_notch(bg_b64: str, piece_b64: str) -> tuple[int, int, int]:
