@@ -429,8 +429,14 @@ class UnicomClient(CarrierClient):
             raise CarrierError(f"联通登录响应异常: {body[:120]}") from err
         code = str(result.get("code") or "")
         if code not in ("0", "0000"):
-            desc = str(result.get("desc") or "")
-            # 2 = 账号或密码错误；4102/4103/3102 = 凭据类失败
+            desc = str(result.get("dsc") or result.get("desc") or "")
+            # code=2 有双义（实测 2026-10-25）：
+            #   "请使用短信验证码登录进行身份验证" = 账号被强制短信登录（新安全策略）
+            #   其他 = 密码错误
+            if code == "2" and "短信验证码" in desc:
+                raise CarrierAuthError(
+                    "unicom_forced_sms", "该账号已被联通强制使用短信验证码登录"
+                )
             if code in ("2", "4102", "4103", "3102"):
                 raise CarrierAuthError("unicom_invalid_credentials", desc)
             raise CarrierError("unicom_login_failed", desc or f"code {code}")
@@ -734,4 +740,62 @@ class UnicomOpenIdClient(CarrierClient):
                         data["flow_general"] = sums["通用流量"]
         except (CarrierError, ValueError, TypeError) as err:
             _LOGGER.info("微厅余量明细失败（不影响基础数据）: %s", err)
+        return finish(data)
+
+
+class UnicomCookieClient(CarrierClient):
+    """联通客户端：Cookie 导入模式（H5/App 登录一次后粘贴 Cookie）。
+
+    查询走 servicequerybusiness 两接口（与 App/H5 同源），会话失效
+    (999998/999999/401/403) 时抛认证错误引导重新导入。
+    """
+
+    carrier = "unicom"
+
+    def __init__(self, session, data: dict[str, Any]) -> None:
+        super().__init__(session, data)
+        self._cookie = str(data.get("cookies") or "")
+
+    async def _query_url(self, url: str) -> dict[str, Any]:
+        status, body = await self._request(
+            "POST", url, form={},
+            headers={"User-Agent": UNICOM_UA, "Cookie": self._cookie},
+        )
+        text = body.strip()
+        if text in ("999998", "999999") or status in (401, 403):
+            raise CarrierAuthError("unicom_session_expired")
+        try:
+            return json.loads(body)
+        except ValueError as err:
+            raise CarrierError(f"联通查询响应异常: {body[:120]}") from err
+
+    async def async_fetch(self) -> dict[str, Any]:
+        data = empty_data("unicom", self.phone)
+        if not self._cookie:
+            raise CarrierAuthError("unicom_session_expired")
+        package = await self._query_url(UNICOM_PACKAGE_URL)
+        usage = _parse_ocs_usage(package)
+        for key, value in usage.items():
+            if value:
+                data[key] = value
+        try:
+            balance_payload = await self._query_url(UNICOM_BALANCE_URL)
+            balance_data = (
+                balance_payload.get("data")
+                if isinstance(balance_payload.get("data"), dict)
+                else {}
+            )
+            if balance_data:
+                data["balance"] = to_float(
+                    balance_data.get("canusefeecustNew") or balance_data.get("canusefeecust")
+                )
+                data["month_cost"] = to_float(
+                    balance_data.get("totalrealfee") or balance_data.get("realfeecustnew")
+                )
+                if balance_data.get("packageName"):
+                    data["plan_name"] = balance_data.get("packageName")
+        except CarrierError as err:
+            _LOGGER.debug("联通余额查询失败（忽略）: %s", err)
+        if data["plan_name"] is None:
+            data["plan_name"] = package.get("packageName") or None
         return finish(data)

@@ -604,6 +604,11 @@ class MobileClient(CarrierClient):
                 used, total, remain, _unit = _item(note)
             data["sms"] = usage_block(used, total, remain)
 
+    def export_session_cookies(self) -> str:
+        """登录成功后导出会话 Cookie（SSO + JSESSIONID），供 coordinator 复用。"""
+        merged = self._parse_cookie_header()
+        return "; ".join(f"{k}={v}" for k, v in merged.items())
+
     def export_credentials(self) -> dict[str, Any]:
         exported = {"device_id": self._device_id}
         # native 通道 refreshSession 会滑动顺延 Cookie；把合并后的会话带回写

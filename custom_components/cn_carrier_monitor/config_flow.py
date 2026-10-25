@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import logging
 
+import aiohttp
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
-from homeassistant.helpers.aiohttp_client import async_create_clientsession, async_get_clientsession
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import (
     BroadnetClient,
@@ -23,6 +24,7 @@ from .api import (
     MobileClient,
     TelecomClient,
     UnicomClient,
+    UnicomCookieClient,
     UnicomOpenIdClient,
     async_send_sms_code,
 )
@@ -33,6 +35,7 @@ from .const import (
     AUTH_MOBILE_SMS,
     AUTH_TELECOM_PASSWORD,
     AUTH_TELECOM_SMS,
+    AUTH_UNICOM_COOKIE,
     AUTH_UNICOM_OPENID,
     AUTH_UNICOM_PASSWORD,
     AUTH_UNICOM_SMS,
@@ -56,6 +59,7 @@ from .const import (
     DEFAULT_INTERVAL,
     DOMAIN,
 )
+from .net import build_connector
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -123,7 +127,7 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 and entry.data.get(CONF_PHONE)
             ):
                 self._sms_sent = False
-                session = async_create_clientsession(self.hass)
+                session = aiohttp.ClientSession(connector=build_connector())
                 sent = False
                 try:
                     client = TelecomClient(session, dict(entry.data))
@@ -140,6 +144,7 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 (CARRIER_TELECOM, AUTH_TELECOM_SMS): "telecom_sms",
                 (CARRIER_UNICOM, AUTH_UNICOM_PASSWORD): "unicom",
                 (CARRIER_UNICOM, AUTH_UNICOM_SMS): "unicom_sms",
+                (CARRIER_UNICOM, AUTH_UNICOM_COOKIE): "unicom_cookie",
                 (CARRIER_UNICOM, AUTH_UNICOM_OPENID): "unicom_openid",
                 (CARRIER_MOBILE, AUTH_MOBILE_SMS): "mobile_sms",
                 (CARRIER_MOBILE, AUTH_MOBILE_PASSWORD): "mobile_password",
@@ -190,7 +195,7 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             phone = user_input[CONF_PHONE]
             password = user_input[CONF_PASSWORD]
-            session = async_create_clientsession(self.hass)
+            session = aiohttp.ClientSession(connector=build_connector())
             try:
                 client = TelecomClient(session, {"phone": phone, **user_input})
                 creds = await client.async_login(phone, password)
@@ -258,7 +263,7 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors = {}
         if user_input is not None:
             self._phone = user_input[CONF_PHONE]
-            session = async_create_clientsession(self.hass)
+            session = aiohttp.ClientSession(connector=build_connector())
             sent = False
             try:
                 client = TelecomClient(session, {"phone": self._phone})
@@ -287,7 +292,7 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors = {}
         if user_input is not None:
             code = user_input["code"].strip()
-            session = async_create_clientsession(self.hass)
+            session = aiohttp.ClientSession(connector=build_connector())
             data = {}
             try:
                 client = TelecomClient(session, {"phone": self._phone})
@@ -336,6 +341,7 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return await {
                 AUTH_UNICOM_SMS: self.async_step_unicom_sms,
                 AUTH_UNICOM_PASSWORD: self.async_step_unicom,
+                AUTH_UNICOM_COOKIE: self.async_step_unicom_cookie,
                 AUTH_UNICOM_OPENID: self.async_step_unicom_openid,
             }[user_input["mode"]]()
         return self.async_show_form(
@@ -346,6 +352,7 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         {
                             AUTH_UNICOM_SMS: "短信验证码登录（推荐）",
                             AUTH_UNICOM_PASSWORD: "服务密码登录",
+                            AUTH_UNICOM_COOKIE: "粘贴 Cookie（H5 登录一次后导出）",
                             AUTH_UNICOM_OPENID: "小程序 openid 导入",
                         }
                     )
@@ -360,7 +367,7 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             phone = user_input[CONF_PHONE]
             password = user_input[CONF_PASSWORD]
-            session = async_create_clientsession(self.hass)
+            session = aiohttp.ClientSession(connector=build_connector())
             try:
                 client = UnicomClient(session, {"phone": phone, **user_input})
                 creds = await client.async_login(phone, password)
@@ -403,7 +410,7 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         unique_phone = None
         if user_input is not None:
             openid = user_input[CONF_OPENID].strip()
-            session = async_create_clientsession(self.hass)
+            session = aiohttp.ClientSession(connector=build_connector())
             try:
                 client = UnicomOpenIdClient(session, {"openid": openid})
                 snapshot = await client.async_fetch()
@@ -446,7 +453,7 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             self._phone = user_input[CONF_PHONE]
             result_token = user_input.get("result_token", "").strip()
-            session = async_create_clientsession(self.hass)
+            session = aiohttp.ClientSession(connector=build_connector())
             hint = ""
             try:
                 client = UnicomClient(session, {"phone": self._phone})
@@ -481,7 +488,7 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors = {}
         if user_input is not None:
             code = user_input["code"].strip()
-            session = async_create_clientsession(self.hass)
+            session = aiohttp.ClientSession(connector=build_connector())
             data = {}
             try:
                 client = UnicomClient(session, {"phone": self._phone})
@@ -514,6 +521,45 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             ),
             errors=errors,
             description_placeholders={"hint": hint, "url": "m.client.10010.com/login-web"},
+        )
+
+    async def async_step_unicom_cookie(self, user_input=None):
+        """联通 Cookie 导入：H5/App 登录一次后从请求头复制 Cookie。"""
+        errors = {}
+        if user_input is not None:
+            phone = user_input[CONF_PHONE]
+            cookie = user_input[CONF_COOKIES].strip()
+            session = aiohttp.ClientSession(connector=build_connector())
+            try:
+                client = UnicomCookieClient(
+                    session, {"phone": phone, "cookies": cookie})
+                snapshot = await client.async_fetch()
+                data = {
+                    CONF_CARRIER: CARRIER_UNICOM,
+                    CONF_AUTH_MODE: AUTH_UNICOM_COOKIE,
+                    CONF_PHONE: phone or str(snapshot.get("phone") or ""),
+                    CONF_COOKIES: cookie,
+                    CONF_INTERVAL: int(user_input.get(CONF_INTERVAL, DEFAULT_INTERVAL)),
+                }
+            except CarrierAuthError:
+                errors["base"] = "unicom_session_expired"
+            except CarrierError as err:
+                errors["base"] = "cannot_connect"
+                _LOGGER.warning("联通 Cookie 校验失败: %s", err)
+            finally:
+                await session.close()
+            if not errors:
+                return await self._persist(data)
+        return self.async_show_form(
+            step_id="unicom_cookie",
+            data_schema=vol.Schema(
+                {
+                    **_phone_schema(self._phone),
+                    vol.Required(CONF_COOKIES): str,
+                    **_interval_schema(),
+                }
+            ),
+            errors=errors,
         )
 
     # ------------------------------------------------------------------ mobile
@@ -564,7 +610,7 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         detected_phone = None
         if user_input is not None:
             code = user_input["code"].strip()
-            session = async_create_clientsession(self.hass)
+            session = aiohttp.ClientSession(connector=build_connector())
             try:
                 client = MobileClient(
                     session, {CONF_PHONE: self._phone, CONF_AUTH_MODE: AUTH_MOBILE_SMS}
@@ -572,11 +618,13 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 await client.async_submit_code(self._phone, code)
                 snapshot = await client.async_fetch()
                 detected_phone = str(snapshot.get("phone") or "") or None
+                cookies = client.export_session_cookies()
                 data = {
                     CONF_CARRIER: CARRIER_MOBILE,
                     CONF_AUTH_MODE: AUTH_MOBILE_SMS,
                     CONF_PHONE: self._phone,
                     CONF_DEVICE_ID: client.export_credentials().get("device_id", ""),
+                    CONF_COOKIES: cookies,
                     CONF_INTERVAL: int(user_input.get(CONF_INTERVAL, DEFAULT_INTERVAL)),
                 }
             except CarrierAuthError as err:
@@ -606,7 +654,7 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             phone = user_input[CONF_PHONE]
             password = user_input[CONF_PASSWORD]
-            session = async_create_clientsession(self.hass)
+            session = aiohttp.ClientSession(connector=build_connector())
             try:
                 client = MobileClient(
                     session, {"phone": phone, CONF_AUTH_MODE: AUTH_MOBILE_PASSWORD}
@@ -649,7 +697,7 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             phone = user_input[CONF_PHONE]
             cookie = user_input[CONF_COOKIES].strip()
-            session = async_create_clientsession(self.hass)
+            session = aiohttp.ClientSession(connector=build_connector())
             try:
                 client = MobileClient(
                     session,
@@ -693,7 +741,7 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             source = user_input.get("request_source", "").strip()
             cookie = user_input.get(CONF_COOKIES, "").strip()
-            session = async_create_clientsession(self.hass)
+            session = aiohttp.ClientSession(connector=build_connector())
             normalized = None
             try:
                 normalized = BroadnetClient.parse_import(source, cookie)

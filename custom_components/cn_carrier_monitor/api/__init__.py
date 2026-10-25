@@ -6,7 +6,7 @@ from .base import CarrierAuthError, CarrierClient, CarrierError, empty_data  # n
 from .broadnet import BroadnetClient
 from .mobile import MobileClient, async_send_sms_code
 from .telecom import TelecomClient
-from .unicom import UnicomClient, UnicomOpenIdClient
+from .unicom import UnicomClient, UnicomCookieClient, UnicomOpenIdClient
 
 CLIENTS = {
     "telecom": TelecomClient,
@@ -20,6 +20,8 @@ def create_client(carrier: str, session, data: dict):
     """Instantiate the right client for an auth mode."""
     if carrier == "unicom" and data.get("auth_mode") == "openid":
         return UnicomOpenIdClient(session, data)
+    if carrier == "unicom" and data.get("auth_mode") == "cookie":
+        return UnicomCookieClient(session, data)
     factory = CLIENTS.get(carrier)
     if factory is None:
         raise CarrierError(f"未知运营商: {carrier}")
@@ -34,6 +36,7 @@ __all__ = [
     "MobileClient",
     "TelecomClient",
     "UnicomClient",
+    "UnicomCookieClient",
     "UnicomOpenIdClient",
     "async_send_sms_code",
     "create_client",

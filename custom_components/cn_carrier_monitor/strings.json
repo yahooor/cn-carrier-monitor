@@ -131,6 +131,15 @@
           "code": "短信验证码",
           "interval": "刷新间隔（分钟）"
         }
+      },
+      "unicom_cookie": {
+        "title": "中国联通（Cookie 导入）",
+        "description": "在电脑浏览器打开 m.client.10010.com/login-web 登录成功后，F12 → 网络 → 任意请求 → 复制请求头里的 Cookie 值粘贴到这里。",
+        "data": {
+          "phone": "手机号",
+          "cookies": "Cookie",
+          "interval": "刷新间隔（分钟）"
+        }
       }
     },
     "error": {
@@ -161,7 +170,8 @@
       "telecom_credentials_missing": "缺少登录凭证，请重新配置",
       "unicom_sms_send_failed": "短信下发失败：{reason}",
       "unicom_sms_login_failed": "短信验证码错误或已过期，请重试",
-      "unicom_credentials_missing": "缺少登录凭证，请重新配置"
+      "unicom_credentials_missing": "缺少登录凭证，请重新配置",
+      "unicom_forced_sms": "该账号已被联通强制要求短信验证码登录（新安全策略），请改用「短信验证码登录」方式：手机打开 m.client.10010.com/login-web 完成滑块后输入收到的验证码。"
     },
     "abort": {
       "already_configured": "该账号已配置",

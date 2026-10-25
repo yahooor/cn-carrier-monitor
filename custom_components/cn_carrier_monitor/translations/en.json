@@ -131,6 +131,15 @@
           "code": "SMS code",
           "interval": "Refresh interval (minutes)"
         }
+      },
+      "unicom_cookie": {
+        "title": "China Unicom (Cookie)",
+        "description": "Log in at m.client.10010.com/login-web in a desktop browser, then copy the Cookie request header from DevTools and paste it here.",
+        "data": {
+          "phone": "Phone number",
+          "cookies": "Cookie",
+          "interval": "Refresh interval (minutes)"
+        }
       }
     },
     "error": {
@@ -161,7 +170,8 @@
       "telecom_credentials_missing": "Missing credentials, reconfigure the account",
       "unicom_sms_send_failed": "Failed to send the SMS code: {reason}",
       "unicom_sms_login_failed": "Wrong or expired SMS code",
-      "unicom_credentials_missing": "Missing credentials, reconfigure the account"
+      "unicom_credentials_missing": "Missing credentials, reconfigure the account",
+      "unicom_forced_sms": "This account is forced to SMS-code login by China Unicom. Use the SMS login method instead: open m.client.10010.com/login-web on your phone, complete the slider, then enter the received code."
     },
     "abort": {
       "already_configured": "This account is already configured",

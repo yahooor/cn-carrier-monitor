@@ -29,9 +29,15 @@ def test_regression_undefined_names_ruff_f821():
 
 
 def test_regression_no_session_close_in_config_flow():
-    """BUG: config_flow 关闭 HA 管理的 clientsession（12 处 WARNING）。"""
+    """BUG: config_flow 关闭 HA 管理的 clientsession（12 处 WARNING）。
+
+    守卫语义：禁止关闭 HA 共享会话（async_get_clientsession 返回值）；
+    自建的临时会话（aiohttp.ClientSession(...)）必须关闭。"""
     src = (CCM / "config_flow.py").read_text(encoding="utf-8")
-    assert "session.close()" not in src
+    assert "self._shared_session.close" not in src
+    assert "_session().close" not in src
+    # 共享会话只用于发短信（无需 Cookie 隔离），其余步骤一律自建会话
+    assert src.count("async_get_clientsession") <= 2
 
 
 def test_regression_options_flow_new_api():
