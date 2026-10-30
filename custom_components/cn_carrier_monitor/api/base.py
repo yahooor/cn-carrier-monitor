@@ -36,6 +36,8 @@ def empty_data(carrier: str, phone: str) -> dict[str, Any]:
         "balance": None,      # 元, float
         "month_cost": None,   # 元, float
         "plan_name": None,
+        "plan_price": None,   # 套餐月费（如 "8元/月"）
+        "location": None,     # 归属地（如 湖南张家界）
         "points": None,
         "flow_general": None,  # {"used": GB, "total": GB, "remain": GB}
         "flow_directed": None,

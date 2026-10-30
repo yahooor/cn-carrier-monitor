@@ -805,6 +805,19 @@ class UnicomCookieClient(CarrierClient):
             data["plan_name"] = package.get("packageName")
         if package.get("flowExceed") is not None:
             data["extra"]["flow_exceed"] = package.get("flowExceed")
+        # 语音/短信（WT 渠道汇总字段；0 也是真实数据——王卡无语音权益）
+        voice_sum = to_float(package.get("voiceSumresource")) or 0.0
+        voice_used = to_float(package.get("voiceHeadUsed")) or 0.0
+        if package.get("voiceSumresource") is not None:
+            data["voice"] = usage_block(voice_used, voice_sum,
+                                        round(voice_sum - voice_used, 1))
+        sms_sum = to_float(package.get("canUseSmsAll")) or to_float(
+            package.get("smsSumresource"))
+        sms_used = to_float(package.get("smsHeadUsed")) or 0.0
+        if sms_sum is not None:
+            data["sms"] = usage_block(sms_used, sms_sum, round(sms_sum - sms_used, 1))
+        if package.get("leftMonth") is not None:
+            data["extra"]["left_month"] = package.get("leftMonth")
         # 顶层汇总（网页版提供，单位随 canuseFlowAllUnit）
         if package.get("canUseFlowAll") is not None:
             data["extra"]["flow_all"] = package.get("canUseFlowAll")

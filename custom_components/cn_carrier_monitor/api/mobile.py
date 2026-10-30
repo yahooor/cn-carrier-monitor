@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -26,15 +27,18 @@ from typing import Any
 
 import aiohttp
 
+try:  # wx.10086.cn 按 TLS 指纹拦截 OpenSSL 客户端
+    from curl_cffi import requests as _curl_requests
+except ImportError:
+    _curl_requests = None
+
 from ..const import (
     MOBILE_BACK_URL,
     MOBILE_CHANNEL_ID,
-    MOBILE_FEE_URL,
     MOBILE_LOAD_TOKEN_URL,
     MOBILE_LOGIN_HOST,
     MOBILE_LOGIN_PAGE,
     MOBILE_LOGIN_URL,
-    MOBILE_MARGIN_URL,
     MOBILE_PLAN_URL,
     MOBILE_QUERY_REFERER,
     MOBILE_SEND_SMS_URL,
@@ -89,6 +93,11 @@ _ENVELOPE_DEFAULTS = {
     "xc": "B2000", "ak2": None, "cv": "12.5.5", "sb": "apple", "st": 2,
 }
 
+# 2026-10-31 实测：旧 serviceMargin/fareBalance、getNewMarginInfo 已下线（返回 SPA 页面）
+MOBILE_FEE_URL_V2 = "https://wx.10086.cn/website/fareBalance"
+MOBILE_MARGIN_URL_V2 = "https://wx.10086.cn/website/uniApi/getNewMarginInfo"
+MOBILE_MARGIN_QRY_URL_V2 = "https://wx.10086.cn/website/uniApi/getMarginQueryInfo"
+MOBILE_SCORE_URL = "https://wx.10086.cn/website/score/news"
 WX_AES_KEY = b"1234123412ABCDEF"
 WX_AES_IV = b"ABCDEF1234123412"
 
@@ -494,12 +503,21 @@ class MobileClient(CarrierClient):
             headers["Cookie"] = self._cookie
         return headers
 
-    async def _wx_query(self, url: str) -> dict[str, Any] | None:
+    async def _wx_query(
+        self, url: str, *, method: str = "GET", json_body: dict | None = None
+    ) -> dict[str, Any] | None:
         ts = int(time.time() * 1000)
-        sep = "&" if "?" in url else "?"
-        status, body = await self._request(
-            "GET", f"{url}{sep}t={ts}", headers=self._query_headers()
-        )
+        target = url
+        if method == "GET":
+            target = f"{url}{('&' if '?' in url else '?')}t={ts}"
+        # wx.10086.cn 按 TLS 指纹拦截 OpenSSL（aiohttp）客户端：优先 curl_cffi
+        cffi = await self._cffi_wx(target, method, json_body)
+        if cffi is not None:
+            status, body = cffi
+        else:
+            status, body = await self._request(
+                method, target, json_body=json_body, headers=self._query_headers()
+            )
         if status != 200:
             _LOGGER.debug("移动网厅查询 %s HTTP %s", url, status)
             return None
@@ -515,6 +533,39 @@ class MobileClient(CarrierClient):
         if any(mark in joined for mark in ("请登录", "login.htm", "notLogin", "未登录")):
             raise CarrierAuthError("mobile_session_expired")
         return payload
+
+
+    async def _cffi_wx(self, url: str, method: str = "GET",
+                       json_body: dict | None = None):
+        """curl_cffi（Chrome TLS 指纹）请求；不可用或失败返回 None。"""
+        if _curl_requests is None:
+            return None
+
+        def _do():
+            headers = {
+                k: v for k, v in self._query_headers().items()
+                if k.lower() != "cookie"
+            }
+            cookies: dict[str, str] = {}
+            for part in self._cookie.split(";"):
+                if "=" in part:
+                    k, _, v = part.strip().partition("=")
+                    if k:
+                        cookies[k] = v
+            try:
+                if method == "GET":
+                    r = _curl_requests.get(url, headers=headers, cookies=cookies,
+                                           impersonate="chrome", timeout=25)
+                else:
+                    r = _curl_requests.post(url, json=json_body, headers=headers,
+                                            cookies=cookies,
+                                            impersonate="chrome", timeout=25)
+                return r.status_code, r.text
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("移动 curl_cffi 请求失败: %s", err)
+                return None
+
+        return await asyncio.to_thread(_do)
 
     # ------------------------------------------------------------------ fetch
 
@@ -550,18 +601,58 @@ class MobileClient(CarrierClient):
     async def _wx_fetch(self, data: dict[str, Any]) -> None:
         plan = await self._wx_query(MOBILE_PLAN_URL)
         if plan:
-            data["plan_name"] = (
-                ((plan.get("object") or {}).get("resultData") or {}).get("curPlanName")
-            ) or None
-        fee = await self._wx_query(MOBILE_FEE_URL)
-        if fee and data["balance"] is None:
+            rd = (plan.get("object") or {}).get("resultData") or {}
+            data["plan_name"] = rd.get("curPlanName") or None
+            if rd.get("curPlanPrice"):
+                data["plan_price"] = rd.get("curPlanPrice")
+        fee = await self._wx_query(MOBILE_FEE_URL_V2)
+        if fee:
             fee_rsp = (fee.get("data") or {}).get("realFeeQryRsp") or {}
-            data["balance"] = to_float(fee_rsp.get("curFeeTotal"))
             if data["balance"] is None:
-                data["balance"] = to_float(fee_rsp.get("realFee"))
-        margin = await self._wx_query(MOBILE_MARGIN_URL)
+                data["balance"] = to_float(
+                    fee_rsp.get("curFeeTotal") or fee_rsp.get("curFee"))
+            # 本月实时话费（8 元卡 = 8.00，实测）
+            if data["month_cost"] is None:
+                data["month_cost"] = to_float(fee_rsp.get("realFee"))
+            extra = data["extra"]
+            for src_key, dst in (("oweFee", "owed"), ("payType", "pay_type"),
+                                 ("userSpecBalance", "user_spec_balance")):
+                val = to_float(fee_rsp.get(src_key))
+                if val is not None:
+                    extra[dst] = val
+                elif fee_rsp.get(src_key):
+                    extra[dst] = fee_rsp.get(src_key)
+        margin = await self._wx_query(
+            MOBILE_MARGIN_URL_V2, method="POST",
+            json_body={"operation": "getCustomerKeyMessage"})
         if margin:
             self._parse_margin(margin, data)
+        # 积分（明文 JSON）
+        try:
+            _st, score_body = await self._request(
+                "GET", MOBILE_SCORE_URL, headers=self._query_headers())
+            score = json.loads(score_body)
+            pv = to_float((score.get("qryInfoRsp") or {}).get("pointValue"))
+            if pv is not None:
+                data["points"] = pv
+        except (CarrierError, ValueError) as err:
+            _LOGGER.debug("移动积分查询失败（忽略）: %s", err)
+
+        # 归属地 / 套餐code（getMarginQueryInfo）
+        try:
+            qry = await self._wx_query(
+                MOBILE_MARGIN_QRY_URL_V2, method="POST",
+                json_body={"operation": "getCustomerKeyMessage"})
+            if not qry:
+                raise CarrierError("归属地接口无响应")
+            assign = ((qry.get("data") or {}).get("resultData") or {}).get("customerAssignment")
+            if assign:
+                data["location"] = assign
+            tariff = ((qry.get("data") or {}).get("resultData") or {}).get("tariffPackages")
+            if tariff and not data["plan_name"]:
+                data["plan_name"] = tariff
+        except CarrierError as err:
+            _LOGGER.debug("移动归属地查询失败（忽略）: %s", err)
 
     def _parse_margin(self, payload: dict[str, Any], data: dict[str, Any]) -> None:
         rd = (payload.get("data") or {}).get("resultData") or {}

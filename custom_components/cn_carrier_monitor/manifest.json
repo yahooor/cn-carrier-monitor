@@ -15,7 +15,9 @@
   "loggers": [
     "custom_components.cn_carrier_monitor"
   ],
-  "requirements": [],
+  "requirements": [
+    "curl_cffi>=0.9"
+  ],
   "single_config_entry": false,
   "version": "1.2.0"
 }
