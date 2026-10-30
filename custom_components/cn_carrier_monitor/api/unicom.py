@@ -744,58 +744,108 @@ class UnicomOpenIdClient(CarrierClient):
 
 
 class UnicomCookieClient(CarrierClient):
-    """联通客户端：Cookie 导入模式（H5/App 登录一次后粘贴 Cookie）。
+    """联通客户端：网页 Cookie 模式（新版网厅扫码/短信登录后导出 Cookie）。
 
-    查询走 servicequerybusiness 两接口（与 App/H5 同源），会话失效
-    (999998/999999/401/403) 时抛认证错误引导重新导入。
+    实测（2026-10-31，真实账号）：
+    - 查询接口 m.client.10010.com/servicequerybusiness/* 需 version=WT（网页票据渠道）
+    - Cookie 来自 www.10010.com 登录会话即可，无需 App token
+    - 会话失效返回 999998/999999/1001
     """
 
     carrier = "unicom"
+    WT_UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+             "AppleWebKit/605.1.15 Mobile/15E148")
+    WT_REFERER = "https://imgxx.client.10010.com/yuliangchaxunsfwt/index.html"
 
     def __init__(self, session, data: dict[str, Any]) -> None:
         super().__init__(session, data)
         self._cookie = str(data.get("cookies") or "")
 
-    async def _query_url(self, url: str) -> dict[str, Any]:
+    def _wt_form(self) -> dict[str, str]:
+        return {
+            "duanlianjieabc": "", "channelCode": "", "serviceType": "",
+            "saleChannel": "", "externalSources": "", "contactCode": "",
+            "ticket": "", "ticketPhone": "", "ticketChannel": "", "version": "WT",
+        }
+
+    async def _query_wt(self, url: str) -> dict[str, Any]:
         status, body = await self._request(
-            "POST", url, form={},
-            headers={"User-Agent": UNICOM_UA, "Cookie": self._cookie},
+            "POST", url, form=self._wt_form(),
+            headers={
+                "User-Agent": self.WT_UA,
+                "Referer": self.WT_REFERER,
+                "Cookie": self._cookie,
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
         )
-        text = body.strip()
+        text = (body or "").strip()
         if text in ("999998", "999999") or status in (401, 403):
             raise CarrierAuthError("unicom_session_expired")
         try:
-            return json.loads(body)
+            payload = json.loads(body)
         except ValueError as err:
             raise CarrierError(f"联通查询响应异常: {body[:120]}") from err
+        if isinstance(payload, dict):
+            code = str(payload.get("code") or "")
+            if code in ("999998", "999999", "1001"):
+                raise CarrierAuthError("unicom_session_expired")
+        return payload if isinstance(payload, dict) else {}
 
     async def async_fetch(self) -> dict[str, Any]:
         data = empty_data("unicom", self.phone)
         if not self._cookie:
             raise CarrierAuthError("unicom_session_expired")
-        package = await self._query_url(UNICOM_PACKAGE_URL)
+
+        package = await self._query_wt(UNICOM_PACKAGE_URL)
         usage = _parse_ocs_usage(package)
         for key, value in usage.items():
             if value:
                 data[key] = value
+        if package.get("packageName"):
+            data["plan_name"] = package.get("packageName")
+        if package.get("flowExceed") is not None:
+            data["extra"]["flow_exceed"] = package.get("flowExceed")
+        # 顶层汇总（网页版提供，单位随 canuseFlowAllUnit）
+        if package.get("canUseFlowAll") is not None:
+            data["extra"]["flow_all"] = package.get("canUseFlowAll")
+            data["extra"]["flow_all_unit"] = package.get("canuseFlowAllUnit")
+        if package.get("canUseSmsAll") is not None:
+            data["extra"]["sms_all"] = package.get("canUseSmsAll")
+
         try:
-            balance_payload = await self._query_url(UNICOM_BALANCE_URL)
-            balance_data = (
-                balance_payload.get("data")
-                if isinstance(balance_payload.get("data"), dict)
-                else {}
-            )
-            if balance_data:
+            balance = await self._query_wt(UNICOM_BALANCE_URL)
+            if balance:
                 data["balance"] = to_float(
-                    balance_data.get("canusefeecustNew") or balance_data.get("canusefeecust")
+                    balance.get("canusefeecustNew") or balance.get("canusefeecust")
                 )
                 data["month_cost"] = to_float(
-                    balance_data.get("totalrealfee") or balance_data.get("realfeecustnew")
+                    balance.get("totalrealfee") or balance.get("realfeecustnew")
                 )
-                if balance_data.get("packageName"):
-                    data["plan_name"] = balance_data.get("packageName")
+                for src_key, dst in (
+                    ("curntbalancecust", "balance_current"),
+                    ("allbowefeecust", "owed"),
+                    ("canuselimitcust", "credit_limit"),
+                    ("directionalPsntFeeTotal", "directional_fee"),
+                ):
+                    val = to_float(balance.get(src_key))
+                    if val is not None:
+                        data["extra"][dst] = val
         except CarrierError as err:
             _LOGGER.debug("联通余额查询失败（忽略）: %s", err)
-        if data["plan_name"] is None:
-            data["plan_name"] = package.get("packageName") or None
+
+        # 总量兜底：通用 + 定向
+        if data["flow_total"] is None:
+            gen, dire = data["flow_general"], data["flow_directed"]
+            if gen or dire:
+                data["flow_total"] = usage_block(
+                    round((gen or {}).get("used", 0) + (dire or {}).get("used", 0), 2),
+                    round((gen or {}).get("total", 0) + (dire or {}).get("total", 0), 2),
+                    round((gen or {}).get("remain", 0) + (dire or {}).get("remain", 0), 2),
+                )
+        if (
+            data["balance"] is None
+            and data["flow_general"] is None
+            and data["voice"] is None
+        ):
+            raise CarrierAuthError("unicom_session_expired")
         return finish(data)

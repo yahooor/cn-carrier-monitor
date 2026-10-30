@@ -523,13 +523,17 @@ class MobileClient(CarrierClient):
         if self._mode == "cookie" and not self._cookie:
             raise CarrierAuthError("mobile_session_missing")
 
+        # 网页登录（sms/password/cookie）的会话 Cookie 只对 wx.10086.cn 网厅有效；
+        # 12.5 原生通道(clientaccess)需要 App 会话，用网页 Cookie 必报会话过期。
+        # 因此默认走 wx 通道；原生仅在显式提供原生 Cookie 时启用。
         native_ok = False
-        try:
-            native_ok = await self._native_fetch(data)
-        except CarrierAuthError:
-            raise
-        except CarrierError as err:
-            _LOGGER.debug("移动原生通道失败，转网厅通道: %s", err)
+        if self._data.get("use_native"):
+            try:
+                native_ok = await self._native_fetch(data)
+            except CarrierAuthError:
+                raise
+            except CarrierError as err:
+                _LOGGER.debug("移动原生通道失败，转网厅通道: %s", err)
 
         if not native_ok:
             await self._wx_fetch(data)

@@ -51,7 +51,7 @@ async def _relogin(hass: HomeAssistant, entry: ConfigEntry, code: str) -> dict:
     data = dict(entry.data)
     from .net import build_connector
 
-    session = aiohttp.ClientSession(connector=build_connector())
+    session = aiohttp.ClientSession(connector=build_connector(legacy_tls=True))
     try:
         if data.get("carrier") == CARRIER_TELECOM:
             client = TelecomClient(session, data)

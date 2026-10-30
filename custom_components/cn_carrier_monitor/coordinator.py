@@ -32,7 +32,7 @@ class CarrierDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # 每个账号独立会话，避免 Cookie 串号；强制 IPv4 + 公共 DNS
         from .net import build_connector
 
-        self.session = aiohttp.ClientSession(connector=build_connector())
+        self.session = aiohttp.ClientSession(connector=build_connector(legacy_tls=True))
         self.client = create_client(self.carrier, self.session, dict(entry.data))
         super().__init__(
             hass,
