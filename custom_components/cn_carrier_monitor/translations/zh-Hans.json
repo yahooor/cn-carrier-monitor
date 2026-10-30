@@ -219,6 +219,12 @@
       },
       "sms_remain": {
         "name": "短信剩余"
+      },
+      "plan_price": {
+        "name": "套餐月费"
+      },
+      "location": {
+        "name": "归属地"
       }
     },
     "button": {

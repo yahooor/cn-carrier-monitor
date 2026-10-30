@@ -136,12 +136,13 @@ class CarrierDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         client = self._build_relogin_client()
         if client is None:
             return "unsupported"
-        self._last_sms_sent_at = now
         if self.carrier == "telecom":
             ok = await client.async_login_sms_send()
         else:
             hint = await client.async_sms_trigger()
             ok = "已下发" in hint or "成功" in hint
+        if ok:
+            self._last_sms_sent_at = now
         if ok:
             from homeassistant.components.persistent_notification import (
                 async_create as pn_create,
@@ -176,6 +177,11 @@ class CarrierDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if client is None:
             return False
         if self.carrier == "telecom":
+            # 验证码绑定发码会话（uid/key/isct）——必须恢复同状态提交
+            saved = self.hass.data.get(DOMAIN, {}).get("sms_state", {}).get(
+                self.entry.data.get("phone", ""))
+            if saved:
+                client.import_sms_state(saved)
             creds = await client.async_login_sms_submit(code)
             updates = {
                 "token": creds["token"],

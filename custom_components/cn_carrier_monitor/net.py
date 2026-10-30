@@ -2,11 +2,15 @@
 
 import aiohttp
 
+_SSL_CTX_CACHE: dict[bool, object] = {}
+
 
 def _ssl_context(legacy: bool):
     """移动 wx.10086.cn 要求旧套件（SECLEVEL=1）+ 允许重协商。"""
     if not legacy:
         return True
+    if legacy in _SSL_CTX_CACHE:
+        return _SSL_CTX_CACHE[legacy]
     import ssl
 
     ctx = ssl.create_default_context()
@@ -15,6 +19,7 @@ def _ssl_context(legacy: bool):
         ctx.options |= 0x4  # OP_LEGACY_SERVER_CONNECT
     except Exception:
         pass
+    _SSL_CTX_CACHE[legacy] = ctx
     return ctx
 
 

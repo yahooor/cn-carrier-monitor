@@ -219,6 +219,12 @@
       },
       "sms_remain": {
         "name": "SMS remaining"
+      },
+      "plan_price": {
+        "name": "Plan price"
+      },
+      "location": {
+        "name": "Location"
       }
     },
     "button": {

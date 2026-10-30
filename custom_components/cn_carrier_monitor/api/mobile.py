@@ -21,6 +21,7 @@ import hashlib
 import json
 import logging
 import random
+import re
 import time
 import urllib.parse
 from typing import Any
@@ -54,6 +55,53 @@ from .base import (
 from .crypto import aes_cbc_encrypt, decrypt_payload, rsa_encrypt_b64
 
 _LOGGER = logging.getLogger(__name__)
+
+# uniApi 反爬三件套（反编译自 app.5d4ab1a0.js，2026-10-31 裁决：可复现）
+LRSBHBG8_VALUE = "ZS93dUFVa2kzaEpQSjM0SG55MUFDdz09"  # bundle 内硬编码常量
+FP_HEADER_NAME = "e76ccba5165fa9b4966ad82a0088e520"
+
+
+def _gen_fingerprint(ua: str, screen_w: int = 1920, screen_h: int = 1080) -> str:
+    """e76ccba… 头值：时间戳hex-随机hex-UA哈希-屏幕面积hex-15位随机（无硬件绑定）。"""
+    import random as _random
+    import re as _re
+
+    def screen_hex():
+        t = str(screen_w * screen_h)
+        return format(int(t), "x") if _re.match(r"\d{5,}", t) else \
+            str(31242 * _random.random()).replace(".", "")[:8]
+
+    def ua_hash():
+        r, a = [], 0
+        for ch in ua:
+            t = ord(ch)
+            r.insert(0, t & 255)
+            if len(r) >= 4:
+                n = 0
+                for i in range(4):
+                    n |= r[i] << (8 * i)
+                a ^= n
+                r = []
+        if r:
+            n = 0
+            for i in range(len(r)):
+                n |= r[i] << (8 * i)
+            a ^= n
+        if a < 0:
+            a = (a + (1 << 32)) & 0xFFFFFFFF
+        return format(a, "x")
+
+    def rand16():
+        s = str(_random.random()).replace(".", "")
+        return s[:7] or "0"
+
+    return "-".join([
+        format(int(time.time() * 1000), "x"),
+        rand16(),
+        ua_hash(),
+        screen_hex(),
+        "".join(str(_random.randint(0, 9)) for _ in range(15)),
+    ])
 
 # ---------------------------------------------------------------- login (web)
 MOBILE_LOGIN_PUBKEY = (
@@ -504,14 +552,15 @@ class MobileClient(CarrierClient):
         return headers
 
     async def _wx_query(
-        self, url: str, *, method: str = "GET", json_body: dict | None = None
+        self, url: str, *, method: str = "GET", json_body: dict | None = None,
+        extra_headers: dict | None = None,
     ) -> dict[str, Any] | None:
         ts = int(time.time() * 1000)
         target = url
         if method == "GET":
             target = f"{url}{('&' if '?' in url else '?')}t={ts}"
         # wx.10086.cn 按 TLS 指纹拦截 OpenSSL（aiohttp）客户端：优先 curl_cffi
-        cffi = await self._cffi_wx(target, method, json_body)
+        cffi = await self._cffi_wx(target, method, json_body, extra_headers)
         if cffi is not None:
             status, body = cffi
         else:
@@ -536,7 +585,8 @@ class MobileClient(CarrierClient):
 
 
     async def _cffi_wx(self, url: str, method: str = "GET",
-                       json_body: dict | None = None):
+                       json_body: dict | None = None,
+                       extra_headers: dict | None = None):
         """curl_cffi（Chrome TLS 指纹）请求；不可用或失败返回 None。"""
         if _curl_requests is None:
             return None
@@ -546,6 +596,8 @@ class MobileClient(CarrierClient):
                 k: v for k, v in self._query_headers().items()
                 if k.lower() != "cookie"
             }
+            if extra_headers:
+                headers.update(extra_headers)
             cookies: dict[str, str] = {}
             for part in self._cookie.split(";"):
                 if "=" in part:
@@ -622,9 +674,26 @@ class MobileClient(CarrierClient):
                     extra[dst] = val
                 elif fee_rsp.get(src_key):
                     extra[dst] = fee_rsp.get(src_key)
+        # uniApi 需三头：csrf-token（页面内联 window.user.csrf，每次加载轮换）
+        # + e76ccba…（本函数生成的关联令牌，服务器仅回显校验）+ Lrsbhbg8（bundle 常量）
+        uni_headers: dict[str, str] = {}
+        try:
+            page = await self._cffi_request(
+                "https://wx.10086.cn/website/spa/main/newHome")
+            if page:
+                m_csrf = re.search(r'"csrf":"([^"]+)"', page[1] or "")
+                if m_csrf:
+                    uni_headers["csrf-token"] = m_csrf.group(1)
+            uni_headers[FP_HEADER_NAME] = _gen_fingerprint(
+                self._query_headers().get("User-Agent", "Chrome/126"))
+            uni_headers["Lrsbhbg8"] = LRSBHBG8_VALUE
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("移动 uniApi 头准备失败: %s", err)
+
         margin = await self._wx_query(
             MOBILE_MARGIN_URL_V2, method="POST",
-            json_body={"operation": "getCustomerKeyMessage"})
+            json_body={"operation": "getCustomerKeyMessage"},
+            extra_headers=uni_headers)
         if margin:
             self._parse_margin(margin, data)
         # 积分（明文 JSON）
@@ -642,7 +711,8 @@ class MobileClient(CarrierClient):
         try:
             qry = await self._wx_query(
                 MOBILE_MARGIN_QRY_URL_V2, method="POST",
-                json_body={"operation": "getCustomerKeyMessage"})
+                json_body={"operation": "getCustomerKeyMessage"},
+                extra_headers=uni_headers)
             if not qry:
                 raise CarrierError("归属地接口无响应")
             assign = ((qry.get("data") or {}).get("resultData") or {}).get("customerAssignment")

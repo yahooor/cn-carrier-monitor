@@ -65,6 +65,10 @@ def _desired_keys(data: dict[str, Any]) -> list[str]:
         keys.append("month_cost")
     if data.get("plan_name"):
         keys.append("plan_name")
+    if data.get("plan_price"):
+        keys.append("plan_price")
+    if data.get("location"):
+        keys.append("location")
     for block_key in ("flow_general", "flow_directed", "flow_total"):
         block = data.get(block_key) or {}
         if block.get("used") is not None:
@@ -164,7 +168,7 @@ class CarrierMonthCostSensor(CarrierSensor):
     _sensor_key = "month_cost"
     _attr_translation_key = "month_cost"
     _attr_device_class = SensorDeviceClass.MONETARY
-    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_state_class = SensorStateClass.TOTAL
     _attr_native_unit_of_measurement = "CNY"
     _attr_icon = "mdi:receipt-text"
 
@@ -277,3 +281,25 @@ ENTITY_FACTORY["voice_used"] = _usage_factory("voice_used", "voice", "used", uni
 ENTITY_FACTORY["voice_remain"] = _usage_factory("voice_remain", "voice", "remain", unit="min")
 ENTITY_FACTORY["sms_used"] = _usage_factory("sms_used", "sms", "used", unit="条")
 ENTITY_FACTORY["sms_remain"] = _usage_factory("sms_remain", "sms", "remain", unit="条")
+
+
+@_register("plan_price")
+class CarrierPlanPriceSensor(CarrierSensor):
+    _sensor_key = "plan_price"
+    _attr_translation_key = "plan_price"
+    _attr_icon = "mdi:tag"
+
+    @property
+    def native_value(self):
+        return self._data.get("plan_price")
+
+
+@_register("location")
+class CarrierLocationSensor(CarrierSensor):
+    _sensor_key = "location"
+    _attr_translation_key = "location"
+    _attr_icon = "mdi:map-marker"
+
+    @property
+    def native_value(self):
+        return self._data.get("location")

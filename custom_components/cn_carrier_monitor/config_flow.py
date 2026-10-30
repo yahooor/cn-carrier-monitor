@@ -134,6 +134,8 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     sent = await client.async_login_sms_send()
                 except CarrierError as err:
                     _LOGGER.warning("电信 reauth 自动发码失败: %s", err)
+                finally:
+                    await session.close()
                 if sent:
                     self.hass.data.setdefault(DOMAIN, {}).setdefault(
                         "sms_state", {}
@@ -218,7 +220,7 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 placeholders["reason"] = getattr(err, "detail", "") or str(err)[:120]
                 _LOGGER.warning("电信登录失败: %s", err)
             finally:
-                pass  # HA-managed session: do not close
+                await session.close()
             if not errors:
                 return await self._persist(data)
         return self.async_show_form(
@@ -274,7 +276,7 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "telecom_sms_send_failed"
                 _LOGGER.warning("电信短信下发失败: %s | %s", err, getattr(err, "detail", ""))
             finally:
-                pass  # HA-managed session: do not close
+                await session.close()
             if sent:
                 self.hass.data.setdefault(DOMAIN, {}).setdefault(
                     "sms_state", {}
@@ -320,7 +322,7 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "cannot_connect"
                 _LOGGER.warning("电信短信登录异常: %s", err)
             finally:
-                pass  # HA-managed session: do not close
+                await session.close()
             if not errors:
                 return await self._persist(data)
         return self.async_show_form(
@@ -388,7 +390,7 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 placeholders["reason"] = getattr(err, "detail", "") or str(err)[:120]
                 _LOGGER.warning("联通登录失败: %s", err)
             finally:
-                pass  # HA-managed session: do not close
+                await session.close()
             if not errors:
                 return await self._persist(data)
         return self.async_show_form(
@@ -428,7 +430,7 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "cannot_connect"
                 _LOGGER.warning("联通 openid 校验失败: %s", err)
             finally:
-                pass  # HA-managed session: do not close
+                await session.close()
             if not errors:
                 return await self._persist(
                     data, unique_phone=unique_phone or data.get(CONF_PHONE) or None
@@ -468,7 +470,7 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 placeholders["reason"] = getattr(err, "detail", "") or str(err)[:120]
                 _LOGGER.warning("联通短信下发失败: %s", err)
             finally:
-                pass  # HA-managed session: do not close
+                await session.close()
         placeholders.setdefault("reason", "")
         placeholders.setdefault("url", "m.client.10010.com/login-web")
         return self.async_show_form(
@@ -508,7 +510,7 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "cannot_connect"
                 _LOGGER.warning("联通短信登录异常: %s", err)
             finally:
-                pass  # HA-managed session: do not close
+                await session.close()
             if not errors:
                 return await self._persist(data)
         return self.async_show_form(
@@ -633,7 +635,7 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "cannot_connect"
                 _LOGGER.warning("移动登录/校验失败: %s", err)
             finally:
-                pass  # HA-managed session: do not close
+                await session.close()
             if not errors:
                 return await self._persist(data, unique_phone=detected_phone)
         return self.async_show_form(
@@ -675,7 +677,7 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "cannot_connect"
                 _LOGGER.warning("移动密码登录失败: %s", err)
             finally:
-                pass  # HA-managed session: do not close
+                await session.close()
             if not errors:
                 return await self._persist(data)
         return self.async_show_form(
@@ -718,7 +720,7 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "cannot_connect"
                 _LOGGER.warning("移动 Cookie 校验失败: %s", err)
             finally:
-                pass  # HA-managed session: do not close
+                await session.close()
             if not errors:
                 return await self._persist(data, unique_phone=detected_phone)
         return self.async_show_form(
@@ -766,7 +768,7 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     errors["base"] = "broadnet_query_failed"
                     _LOGGER.warning("广电查询失败: %s", err)
                 finally:
-                    pass  # HA-managed session: do not close
+                    await session.close()
             if not errors and data:
                 return await self._persist(data)
         return self.async_show_form(
