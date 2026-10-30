@@ -50,6 +50,7 @@ from .base import (
     CarrierError,
     ParseAnomalyError,
     finish,
+    parse_safe,
     to_float,
     usage_block,
 )
@@ -481,6 +482,7 @@ class MobileClient(CarrierClient):
             _LOGGER.debug("移动积分查询失败: %s", err)
         return ok
 
+    @parse_safe
     def _parse_native_plan(self, payload: dict[str, Any], data: dict[str, Any]) -> None:
         """解析 12.5 getNewPlanRemainQry 响应（Pocket-Carrier 验证的结构）。
 
@@ -583,8 +585,11 @@ class MobileClient(CarrierClient):
         if cffi is not None:
             status, body = cffi
         else:
+            headers = self._query_headers()
+            if extra_headers:
+                headers.update(extra_headers)
             status, body = await self._request(
-                method, target, json_body=json_body, headers=self._query_headers()
+                method, target, json_body=json_body, headers=headers
             )
         if status != 200:
             _LOGGER.debug("移动网厅查询 %s HTTP %s", url, status)
@@ -754,6 +759,7 @@ class MobileClient(CarrierClient):
         except CarrierError as err:
             _LOGGER.debug("移动归属地查询失败（忽略）: %s", err)
 
+    @parse_safe
     def _parse_margin(self, payload: dict[str, Any], data: dict[str, Any]) -> None:
         node = payload.get("data")
         rd = node.get("resultData") if isinstance(node, dict) else None

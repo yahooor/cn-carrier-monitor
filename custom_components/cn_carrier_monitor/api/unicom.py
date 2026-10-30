@@ -42,6 +42,7 @@ from .base import (
     CarrierError,
     empty_data,
     finish,
+    parse_safe,
     to_float,
     usage_block,
 )
@@ -132,6 +133,7 @@ def _rsa_login(value: str) -> str:
     return rsa_encrypt_b64(UNICOM_LOGIN_PUBKEY, value + suffix)
 
 
+@parse_safe
 def _parse_flow_detail(detail: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(detail, dict):
         return {}
@@ -195,6 +197,7 @@ def _parse_flow_detail(detail: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+@parse_safe
 def _parse_ocs_usage(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {}

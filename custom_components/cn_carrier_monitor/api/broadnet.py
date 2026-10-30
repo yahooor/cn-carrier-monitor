@@ -28,6 +28,7 @@ from .base import (
     CarrierError,
     empty_data,
     finish,
+    parse_safe,
     to_float,
     usage_block,
 )
@@ -168,6 +169,7 @@ class BroadnetClient(CarrierClient):
         self._parse_user_res(business or {}, data)
         return finish(data)
 
+    @parse_safe
     def _parse_user_res(self, business: dict[str, Any], data: dict[str, Any]) -> None:
         if not isinstance(business, dict):
             raise CarrierError("广电响应结构未知")

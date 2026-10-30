@@ -13,6 +13,27 @@ from ..const import REQUEST_TIMEOUT
 _LOGGER = logging.getLogger(__name__)
 
 
+def parse_safe(func):
+    """解析器装饰器：容器/数值类型崩溃统一转 ParseAnomalyError（protocol_drift）。
+
+    运营商字段类型随省份/套餐漂移（fuzz 实证），任何深层 .get 链崩溃都不该
+    让整次更新以裸 traceback 失败——转为领域异常后由事件日志归类。
+    """
+    import functools
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except ParseAnomalyError:
+            raise
+        except (ValueError, TypeError, AttributeError, KeyError, IndexError) as err:
+            raise ParseAnomalyError(
+                f"{func.__name__}: 响应结构异常 {type(err).__name__}: {err}") from None
+
+    return wrapper
+
+
 class CarrierError(Exception):
     """A recoverable carrier API error (connection/protocol/remote)."""
 

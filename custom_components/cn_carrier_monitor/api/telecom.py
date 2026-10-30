@@ -39,6 +39,7 @@ from .base import (
     ParseAnomalyError,
     empty_data,
     finish,
+    parse_safe,
     to_float,
     to_int,
     usage_block,
@@ -607,6 +608,7 @@ class TelecomClient(CarrierClient):
 
     # ------------------------------------------------------------------ parse
 
+    @parse_safe
     def _parse_summary(self, payload: dict[str, Any], data: dict[str, Any]) -> None:
         flow_info = payload.get("flowInfo")
         if not isinstance(flow_info, dict):
