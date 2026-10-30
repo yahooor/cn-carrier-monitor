@@ -1,0 +1,33 @@
+name: Drift Canary
+
+on:
+  schedule:
+    - cron: "17 3 * * *"   # 每日 UTC 03:17（北京时间 11:17）
+  workflow_dispatch:
+
+jobs:
+  endpoint-drift:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 无凭据端点存活检测
+        run: |
+          pip install requests
+          python tests/canary_endpoints.py
+      - name: 漂移时开 issue
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `🚨 运营商端点漂移 ${new Date().toISOString().slice(0,10)}`,
+              body: '金丝雀检测到端点行为变化，请查看 workflow 日志并对照 docs/协议基线.md 复核。',
+              labels: ['drift']
+            });
