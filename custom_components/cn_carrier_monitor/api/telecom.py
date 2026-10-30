@@ -21,6 +21,11 @@ from ..const import (
     TELECOM_CLIENT_TYPE,
     TELECOM_LOGIN_URL,
     TELECOM_LOGIN_V2_HOSTS,
+    TELECOM_V2_CLIENT_TYPE,
+    TELECOM_V2_QUERY_HOST,
+    TELECOM_V2_SHOP_ID,
+    TELECOM_V2_SOURCE,
+    TELECOM_V2_SOURCE_PASSWORD,
     TELECOM_QUERY_URL,
     TELECOM_SHOP_ID,
     TELECOM_SOURCE,
@@ -96,6 +101,9 @@ class TelecomClient(CarrierClient):
         self._uid = _hashlib.md5(f"CT_IOS_11_{self.phone}".encode()).hexdigest()
         self._key = ""
         self._isct = "0"
+        # 短信登录(v2)签发的 token 只认 v2 查询族；密码登录(v1)用旧族
+        self._v2 = str(data.get("auth_mode") or "") == "sms"
+        self._user_id = str(data.get("user_id") or "")
         self._headers = {
             "Accept": "application/json",
             "Content-Type": "application/json; charset=UTF-8",
@@ -390,6 +398,170 @@ class TelecomClient(CarrierClient):
         self._key = str(state.get("key") or "")
         self._isct = str(state.get("isct") or "0")
 
+
+    # ------------------------------------------------------------------ v2 查询族
+
+    async def _service_v2(self, path: str, code: str, field_data: dict):
+        """v2 业务查询（appfuwuhd，source=120002 / shopId=20004）。"""
+        import json as _json
+        import time as _time
+
+        ts = _time.strftime("%Y%m%d%H%M%S")
+        body = {
+            "headerInfos": {
+                "broadAccount": "", "clientType": TELECOM_V2_CLIENT_TYPE,
+                "fixedLineToken": "", "userLoginName": caesar(self.phone),
+                "timestamp": ts, "broadToken": "", "fixedLineAccount": "",
+                "provinceCode": self._province_code, "source": TELECOM_V2_SOURCE,
+                "code": code, "sourcePassword": TELECOM_V2_SOURCE_PASSWORD,
+                "token": self._token, "shopId": TELECOM_V2_SHOP_ID,
+            },
+            "content": {"fieldData": field_data, "attach": "iPhone"},
+        }
+        status, resp = await self._request(
+            "POST", f"{TELECOM_V2_QUERY_HOST}/{path}", json_body=body,
+            headers=self._headers, timeout=25,
+        )
+        try:
+            result = _json.loads(resp)
+        except ValueError as err:
+            raise CarrierError(f"电信 v2 查询响应异常: {resp[:120]}") from err
+        hdr = result.get("headerInfos") or {}
+        hcode = str(hdr.get("code") or "")
+        hreason = str(hdr.get("reason") or "")
+        if hcode in AUTH_EXPIRED_CODES or any(
+            kw in hreason.lower() for kw in AUTH_EXPIRED_HINTS
+        ):
+            raise CarrierAuthError("telecom_session_expired", f"{hcode}: {hreason}")
+        return hdr, (result.get("responseData") or {})
+
+    async def _fetch_v2(self, data: dict) -> dict:
+        """短信登录 token 的查询通道：余额 / 积分 / 流量池 / 语音套餐。"""
+        import time as _time
+
+        # 1. 余额与账单
+        fd_bal = {
+            "account": caesar(self.phone), "queryFlag": "1",
+            "provinceCode": self._province_code, "cityCode": self._city_code,
+            "shopId": TELECOM_V2_SHOP_ID, "accessAuth": "0", "developCode": "",
+            "isChinatelecom": "1", "netType": "",
+        }
+        _h, rd_bal = await self._service_v2(
+            "query/queryPhoneBillBalance", "queryPhoneBillBalance", fd_bal)
+        bal = rd_bal.get("data") or {}
+        bean = bal.get("chargeBean") or {}
+        title = str(bean.get("chargeTitle") or "")
+        arrears = to_float(bal.get("totalArrears")) or 0.0
+        amount = to_float(bean.get("charge")) or 0.0
+        if "欠费" in title or str(bean.get("isShowRed") or "") == "1" or arrears > 0:
+            data["balance"] = -abs(arrears or amount)
+        else:
+            data["balance"] = amount
+        if title:
+            data["extra"]["balance_title"] = title
+        value_list = (bal.get("billExpense") or {}).get("valueList") or []
+        if value_list:
+            data["month_cost"] = to_float(value_list[-1].get("amount"))
+
+        # 2. 积分
+        try:
+            _h, rd_int = await self._service_v2(
+                "query/queryIntegral", "queryIntegral",
+                {"account": caesar(self.phone), "clientType": "1",
+                 "shopId": TELECOM_V2_SHOP_ID})
+            integral = (rd_int.get("data") or {}).get("integral")
+            if integral is not None:
+                data["points"] = to_int(integral)
+        except CarrierAuthError:
+            raise
+        except CarrierError as err:
+            _LOGGER.debug("电信积分查询失败（忽略）: %s", err)
+
+        # 3. 流量池（KB）
+        try:
+            _h, rd_pkg = await self._service_v2(
+                "query/userPackage", "userPackage",
+                {"account": caesar(self.phone), "billingCycle": _time.strftime("%Y%m"),
+                 "queryFlag": "0", "shopId": TELECOM_V2_SHOP_ID, "clientType": "1"})
+            packages = (((rd_pkg.get("data") or {}).get("productOFFRatable") or {})
+                        .get("ratableResourcePackages")) or []
+            used_kb = remain_kb = 0
+            gen_used = gen_remain = 0
+            dir_used = dir_remain = 0
+            items = []
+            for pkg in packages:
+                used_kb += to_int(pkg.get("usageAmount")) or 0
+                remain_kb += to_int(pkg.get("balanceAmount")) or 0
+                for sub in pkg.get("productInfos") or []:
+                    name = str(sub.get("productOFFName") or "流量包")
+                    s_used = to_int(sub.get("usageAmount")) or 0
+                    s_bal = to_int(sub.get("balanceAmount")) or 0
+                    s_total = to_int(sub.get("ratableAmount")) or 0
+                    items.append({
+                        "name": name,
+                        "used": round(s_used / 1048576, 2),
+                        "remain": round(s_bal / 1048576, 2),
+                        "total": round(s_total / 1048576, 2),
+                    })
+                    if "定向" in name or "专属" in name:
+                        dir_used += s_used
+                        dir_remain += s_bal
+                    else:
+                        gen_used += s_used
+                        gen_remain += s_bal
+            if used_kb or remain_kb:
+                data["flow_total"] = usage_block(
+                    round(used_kb / 1048576, 2),
+                    round((used_kb + remain_kb) / 1048576, 2),
+                    round(remain_kb / 1048576, 2))
+            if gen_used or gen_remain:
+                data["flow_general"] = usage_block(
+                    round(gen_used / 1048576, 2),
+                    round((gen_used + gen_remain) / 1048576, 2),
+                    round(gen_remain / 1048576, 2))
+            if dir_used or dir_remain:
+                data["flow_directed"] = usage_block(
+                    round(dir_used / 1048576, 2),
+                    round((dir_used + dir_remain) / 1048576, 2),
+                    round(dir_remain / 1048576, 2))
+            if items:
+                data["extra"]["flow_items"] = items
+        except CarrierAuthError:
+            raise
+        except CarrierError as err:
+            _LOGGER.debug("电信流量池查询失败（忽略）: %s", err)
+
+        # 4. 语音 + 套餐名
+        try:
+            _h, rd_usage = await self._service_v2(
+                "query/qryUserUsage", "qryUserUsage",
+                {"account": caesar(self.phone), "queryFlag": "1", "clientType": "1",
+                 "cityCode": self._city_code, "provinceCode": self._province_code,
+                 "isChinatelecom": "1", "netType": "", "userId": self._user_id,
+                 "developCode": "", "isNewUser": "0", "phoneType": "0",
+                 "shopId": TELECOM_V2_SHOP_ID, "isFromInternational": "0"})
+            ud = rd_usage.get("data") or {}
+            plan = (ud.get("productOFFInformation") or {}).get("content")
+            if plan:
+                data["plan_name"] = plan
+            packages = ud.get("ratableResourcePackages") or []
+            if packages:
+                pkg = packages[0]
+                prog = pkg.get("usageProgress") or {}
+                total_data = pkg.get("totalData") or {}
+                remain = to_float(total_data.get("totalValue"))
+                used = to_float(prog.get("leftBottomTitle"))
+                total = to_float(prog.get("rightBottomTitle"))
+                if used is not None and total is not None and used > total:
+                    used, total = total, used
+                data["voice"] = usage_block(used, total, remain)
+        except CarrierAuthError:
+            raise
+        except CarrierError as err:
+            _LOGGER.debug("电信语音查询失败（忽略）: %s", err)
+
+        return data
+
     async def async_fetch(self) -> dict[str, Any]:
         data = empty_data("telecom", self.phone)
         if not self._password and not self._token:
@@ -399,6 +571,9 @@ class TelecomClient(CarrierClient):
             self._token = creds["token"]
             self._province_code = creds["province_code"]
             self._city_code = creds["city_code"]
+
+        if self._v2:
+            return finish(await self._fetch_v2(data))
 
         result = await self._qry_important_data()
         resp_data = result.get("responseData") or {}

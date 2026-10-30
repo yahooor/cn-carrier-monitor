@@ -56,6 +56,12 @@ TELECOM_LOGIN_URL = "https://appgologin.189.cn:9031/login/client/userLoginNormal
 # Pocket-Carrier 新一代登录族接口（滑块/短信验证码，source=120002）
 TELECOM_LOGIN_V2_URL = "https://appgologinsz.189.cn/login/client"
 # 同集群回退域名（部分内网 DNS 解析不到 sz 域名）
+# v2 查询族（与 v2 登录同源：source=120002/shopId=20004），token 跨族不通用
+TELECOM_V2_QUERY_HOST = "https://appfuwuhd.189.cn:443"
+TELECOM_V2_CLIENT_TYPE = "#13.4.0#channel50#iPhone 11 Pro Max#"
+TELECOM_V2_SOURCE = "120002"
+TELECOM_V2_SOURCE_PASSWORD = "TiqmIZ"
+TELECOM_V2_SHOP_ID = "20004"
 TELECOM_LOGIN_V2_HOSTS = [
     "https://appgologinsz.189.cn",
     "https://appgologin.189.cn:9031",
