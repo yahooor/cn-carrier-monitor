@@ -7,7 +7,6 @@
 - 广电 www.10099.com.cn → 403/WAF 页（阿里云 WAF 存活标志）
 偏差 → 退出码 1（CI 失败 → 自动开 issue）。
 """
-import ssl
 import sys
 
 import requests
