@@ -39,9 +39,18 @@ async def async_setup(hass: HomeAssistant, config) -> bool:
     )
 
     async def async_inject_token(call: ServiceCall) -> None:
-        """调试：直接写入 token 并重载条目（发码在本机完成时使用）。"""
+        """调试/运维：直接写入 token 或 cookies 并重载条目。
+
+        用途：浏览器收割的会话直接灌入，免去删除重建条目。
+        """
         phone = call.data["phone"]
-        updates = {k: call.data[k] for k in ("token", "province_code", "city_code") if k in call.data}
+        updates = {
+            k: call.data[k]
+            for k in ("token", "cookies", "province_code", "city_code")
+            if call.data.get(k)
+        }
+        if not updates:
+            raise HomeAssistantError("至少提供 token 或 cookies 之一")
         for entry in hass.config_entries.async_entries(DOMAIN):
             if entry.data.get("phone") == phone:
                 hass.config_entries.async_update_entry(entry, data={**entry.data, **updates})
@@ -53,7 +62,8 @@ async def async_setup(hass: HomeAssistant, config) -> bool:
         DOMAIN, "inject_token", async_inject_token,
         schema=vol.Schema({
             vol.Required("phone"): str,
-            vol.Required("token"): str,
+            vol.Optional("token"): str,
+            vol.Optional("cookies"): str,
             vol.Optional("province_code"): str,
             vol.Optional("city_code"): str,
         }),
