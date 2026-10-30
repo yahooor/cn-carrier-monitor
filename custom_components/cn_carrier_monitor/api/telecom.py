@@ -36,6 +36,7 @@ from .base import (
     CarrierAuthError,
     CarrierClient,
     CarrierError,
+    ParseAnomalyError,
     empty_data,
     finish,
     to_float,
@@ -79,8 +80,11 @@ def _kb_to_gb(value: Any) -> float | None:
 def _parse_sms_count(value: Any) -> int:
     if value is None:
         return 0
-    match = __import__("re").search(r"[\d.]+", str(value))
-    return int(float(match.group(0))) if match else 0
+    match = __import__("re").search(r"\d+(?:\.\d+)?", str(value))
+    try:
+        return int(float(match.group(0))) if match else 0
+    except (ValueError, OSError):
+        return 0
 
 
 class TelecomClient(CarrierClient):
@@ -449,6 +453,13 @@ class TelecomClient(CarrierClient):
         _h, rd_bal = await self._service_v2(
             "query/queryPhoneBillBalance", "queryPhoneBillBalance", fd_bal)
         bal = rd_bal.get("data") or {}
+        # 主路径结构校验：balance 块全空/未知说明协议漂移，宁可报错也不能静默记 0
+        if not isinstance(bal, dict) or not (
+            bal.get("chargeBean") is not None
+            or bal.get("totalArrears") is not None
+            or bal.get("billExpense") is not None
+        ):
+            raise ParseAnomalyError(f"电信余额响应结构未知: {str(rd_bal)[:120]}")
         bean = bal.get("chargeBean") or {}
         title = str(bean.get("chargeTitle") or "")
         arrears = to_float(bal.get("totalArrears")) or 0.0
@@ -597,7 +608,9 @@ class TelecomClient(CarrierClient):
     # ------------------------------------------------------------------ parse
 
     def _parse_summary(self, payload: dict[str, Any], data: dict[str, Any]) -> None:
-        flow_info = payload.get("flowInfo") or {}
+        flow_info = payload.get("flowInfo")
+        if not isinstance(flow_info, dict):
+            flow_info = {}
         voice_info = payload.get("voiceInfo") or {}
         sms_info = payload.get("smsInfo") or {}
         integral_info = payload.get("integralInfo") or {}
@@ -664,7 +677,10 @@ class TelecomClient(CarrierClient):
         data["points"] = to_int(integral_info.get("integral"))
 
         flow_items: list[dict[str, Any]] = []
-        for item in flow_info.get("flowList") or []:
+        flow_list = flow_info.get("flowList")
+        if not isinstance(flow_list, list):
+            flow_list = []
+        for item in flow_list:
             if not isinstance(item, dict) or "流量" not in str(item.get("title", "")):
                 continue
             used = remain = total = None

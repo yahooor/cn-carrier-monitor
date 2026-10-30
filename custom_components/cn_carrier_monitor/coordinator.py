@@ -14,6 +14,13 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .api import CarrierAuthError, CarrierError, create_client
 from .const import DEFAULT_INTERVAL, DOMAIN
+from .event_log import (
+    EVENT_CIRCUIT_OPEN,
+    EVENT_FAILURE,
+    EVENT_SUCCESS,
+    classify_exception,
+    emit,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -58,10 +65,13 @@ class CarrierDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "circuit_open": True,
                 "fail_streak": self._fail_streak,
             }
+            await self._emit_event(EVENT_CIRCUIT_OPEN, fail_streak=self._fail_streak)
             return degraded
+        started = _time.perf_counter()
         try:
             data = await self.client.async_fetch()
         except CarrierAuthError as err:
+            await self._emit_event(EVENT_FAILURE, err=err, started=started)
             _LOGGER.info("%s 认证失败(%s)", self.entry.title, err)
             if self.supports_sms_relogin:
                 self.hass.async_create_task(self._async_safe_send_relogin_sms())
@@ -77,14 +87,17 @@ class CarrierDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return degraded
             raise ConfigEntryAuthFailed(str(err)) from err
         except CarrierError as err:
+            await self._emit_event(EVENT_FAILURE, err=err, started=started)
             self._fail_streak = getattr(self, "_fail_streak", 0) + 1
             self._last_fail_at = _time.time()
             raise UpdateFailed(str(err)) from err
         except Exception as err:  # noqa: BLE001
+            await self._emit_event(EVENT_FAILURE, err=err, started=started)
             self._fail_streak = getattr(self, "_fail_streak", 0) + 1
             self._last_fail_at = _time.time()
             raise UpdateFailed(f"查询失败: {err}") from err
         self._fail_streak = 0
+        await self._emit_event(EVENT_SUCCESS, data=data, started=started)
         # 会话滑动续期：把客户端刷新后的凭证（联通 token_online、移动 Cookie 等）
         # 写回配置条目；服务端会话顺延后重启 HA 不丢登录态
         try:
@@ -92,6 +105,43 @@ class CarrierDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("凭证回写失败（忽略）: %s", err)
         return data
+
+    # ------------------------------------------------------------------ 事件埋点
+
+    _EVENT_PAYLOAD_FIELDS = ("carrier", "phone")
+
+    async def _emit_event(
+        self,
+        event_type: str,
+        *,
+        err: BaseException | None = None,
+        started: float | None = None,
+        data: dict[str, Any] | None = None,
+        **extra: Any,
+    ) -> None:
+        """把一次更新结果写入结构化事件日志（四分类）；埋点本身绝不抛出。"""
+        import time as _time
+
+        try:
+            payload: dict[str, Any] = {
+                key: self.entry.data.get(key, "") for key in self._EVENT_PAYLOAD_FIELDS
+            }
+            if started is not None:
+                payload["duration_s"] = round(_time.perf_counter() - started, 2)
+            if err is not None:
+                payload["category"] = classify_exception(err)
+                payload["err_type"] = type(err).__name__
+                payload["err"] = str(err)[:200]
+            if data is not None:
+                payload["fields"] = sorted(
+                    k for k, v in data.items()
+                    if k not in ("carrier", "phone", "extra") and v is not None
+                )
+                payload["extra_keys"] = sorted((data.get("extra") or {}).keys())
+            payload.update(extra)
+            await emit(self.hass, event_type, payload)
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("事件埋点失败（忽略）", exc_info=True)
 
     def _async_persist_credentials(self) -> None:
         exported = self.client.export_credentials() or {}

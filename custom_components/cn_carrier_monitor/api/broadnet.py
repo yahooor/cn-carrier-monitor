@@ -169,7 +169,12 @@ class BroadnetClient(CarrierClient):
         return finish(data)
 
     def _parse_user_res(self, business: dict[str, Any], data: dict[str, Any]) -> None:
-        items = ((business.get("intfResultBean") or {}).get("userResList")) or []
+        if not isinstance(business, dict):
+            raise CarrierError("广电响应结构未知")
+        bean = business.get("intfResultBean")
+        items = (bean.get("userResList") if isinstance(bean, dict) else None) or []
+        if not isinstance(items, list):
+            raise CarrierError("广电余量明细结构异常")
         if not isinstance(items, list) or not items:
             raise CarrierError("广电未返回可识别的余量明细")
 

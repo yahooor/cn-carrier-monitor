@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from .base import CarrierAuthError, CarrierClient, CarrierError, empty_data  # noqa: F401
+from .base import (  # noqa: F401
+    CarrierAuthError,
+    CarrierClient,
+    CarrierError,
+    ParseAnomalyError,
+    empty_data,
+)
 from .broadnet import BroadnetClient
 from .mobile import MobileClient, async_send_sms_code
 from .telecom import TelecomClient
@@ -32,6 +38,7 @@ __all__ = [
     "CarrierAuthError",
     "CarrierClient",
     "CarrierError",
+    "ParseAnomalyError",
     "BroadnetClient",
     "MobileClient",
     "TelecomClient",

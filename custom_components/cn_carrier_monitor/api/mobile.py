@@ -48,6 +48,7 @@ from .base import (
     CarrierAuthError,
     CarrierClient,
     CarrierError,
+    ParseAnomalyError,
     finish,
     to_float,
     usage_block,
@@ -148,6 +149,8 @@ MOBILE_MARGIN_QRY_URL_V2 = "https://wx.10086.cn/website/uniApi/getMarginQueryInf
 MOBILE_SCORE_URL = "https://wx.10086.cn/website/score/news"
 WX_AES_KEY = b"1234123412ABCDEF"
 WX_AES_IV = b"ABCDEF1234123412"
+# wx 网厅各接口的已知顶层键（套餐=object，其余=data；native 兜底=rspBody）
+_WX_TOP_KEYS = {"object", "data", "rspBody"}
 
 
 def _native_aes_b64(key: bytes, iv: bytes, plain: str) -> str:
@@ -328,6 +331,19 @@ class MobileClient(CarrierClient):
 
     # ------------------------------------------------------------------ native 12.5
 
+    def _merge_cookies(self, fresh: dict[str, str]) -> None:
+        """把响应下发的 Set-Cookie 合并回会话串（uuid 自愈链路的回收端）。"""
+        if not fresh:
+            return
+        merged = self._parse_cookie_header()
+        changed = False
+        for k, v in fresh.items():
+            if merged.get(k) != v:
+                merged[k] = v
+                changed = True
+        if changed:
+            self._cookie = "; ".join(f"{k}={v}" for k, v in merged.items())
+
     def _parse_cookie_header(self) -> dict[str, str]:
         jar: dict[str, str] = {}
         for part in self._cookie.split(";"):
@@ -473,8 +489,10 @@ class MobileClient(CarrierClient):
         rspBody.newPlanRemainQryRes.planRemianVoiceListRes.planRemianVoiceInfoRes[]:
           voiceRemainNum/voiceUsdNum/voiceSumNum（分钟）
         """
-        rsp = payload.get("rspBody") or {}
-        qry = rsp.get("newPlanRemainQryRes") or {}
+        rsp = payload.get("rspBody")
+        if not isinstance(rsp, dict):
+            return
+        qry = rsp.get("newPlanRemainQryRes")
         if not isinstance(qry, dict):
             return
 
@@ -554,6 +572,7 @@ class MobileClient(CarrierClient):
     async def _wx_query(
         self, url: str, *, method: str = "GET", json_body: dict | None = None,
         extra_headers: dict | None = None,
+        top_keys: frozenset[str] | set[str] | None = None,
     ) -> dict[str, Any] | None:
         ts = int(time.time() * 1000)
         target = url
@@ -575,9 +594,11 @@ class MobileClient(CarrierClient):
             payload = json.loads(text)
         except ValueError:
             _LOGGER.debug("移动网厅查询 %s 响应非 JSON: %s", url, text[:120])
-            return None
-        if not isinstance(payload, dict):
-            return None
+            raise ParseAnomalyError(f"wx 解密/解析失败: {text[:80]}") from None
+        if not isinstance(payload, dict) or not payload:
+            raise ParseAnomalyError(f"wx 响应顶层结构未知: {str(payload)[:80]}")
+        if not (top_keys or _WX_TOP_KEYS).intersection(payload):
+            raise ParseAnomalyError(f"wx 响应缺少已知顶层键: {sorted(payload)[:8]}")
         joined = json.dumps(payload, ensure_ascii=False)[:2000]
         if any(mark in joined for mark in ("请登录", "login.htm", "notLogin", "未登录")):
             raise CarrierAuthError("mobile_session_expired")
@@ -612,6 +633,14 @@ class MobileClient(CarrierClient):
                     r = _curl_requests.post(url, json=json_body, headers=headers,
                                             cookies=cookies,
                                             impersonate="chrome", timeout=25)
+                # Set-Cookie 回收：wx.10086.cn 用 uuid 令牌在任意认证 GET 上
+                # 重签 d.sid（72h 自愈链路）——不回收则续期成果丢失
+                try:
+                    fresh = r.cookies.get_dict()
+                except Exception:  # noqa: BLE001
+                    fresh = {}
+                if fresh:
+                    self._merge_cookies(fresh)
                 return r.status_code, r.text
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug("移动 curl_cffi 请求失败: %s", err)
@@ -678,7 +707,7 @@ class MobileClient(CarrierClient):
         # + e76ccba…（本函数生成的关联令牌，服务器仅回显校验）+ Lrsbhbg8（bundle 常量）
         uni_headers: dict[str, str] = {}
         try:
-            page = await self._cffi_request(
+            page = await self._cffi_wx(
                 "https://wx.10086.cn/website/spa/main/newHome")
             if page:
                 m_csrf = re.search(r'"csrf":"([^"]+)"', page[1] or "")
@@ -696,15 +725,16 @@ class MobileClient(CarrierClient):
             extra_headers=uni_headers)
         if margin:
             self._parse_margin(margin, data)
-        # 积分（明文 JSON）
+        # 积分（明文 JSON；必须走 curl_cffi 通道——wx.10086.cn 拦截 aiohttp TLS）
         try:
-            _st, score_body = await self._request(
-                "GET", MOBILE_SCORE_URL, headers=self._query_headers())
-            score = json.loads(score_body)
+            score = await self._wx_query(
+                MOBILE_SCORE_URL, top_keys={"qryInfoRsp"})
             pv = to_float((score.get("qryInfoRsp") or {}).get("pointValue"))
             if pv is not None:
                 data["points"] = pv
-        except (CarrierError, ValueError) as err:
+        except CarrierAuthError:
+            raise
+        except CarrierError as err:
             _LOGGER.debug("移动积分查询失败（忽略）: %s", err)
 
         # 归属地 / 套餐code（getMarginQueryInfo）
@@ -725,7 +755,10 @@ class MobileClient(CarrierClient):
             _LOGGER.debug("移动归属地查询失败（忽略）: %s", err)
 
     def _parse_margin(self, payload: dict[str, Any], data: dict[str, Any]) -> None:
-        rd = (payload.get("data") or {}).get("resultData") or {}
+        node = payload.get("data")
+        rd = node.get("resultData") if isinstance(node, dict) else None
+        if not isinstance(rd, dict):
+            return
 
         def _item(raw: dict) -> tuple[Any, Any, Any, str]:
             return (raw.get("usedNum"), raw.get("sumNum"), raw.get("remainNum"),

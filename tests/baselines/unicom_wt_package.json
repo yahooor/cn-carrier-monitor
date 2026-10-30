@@ -1,0 +1,13 @@
+{
+  "name": "unicom_wt_package",
+  "url": "https://m.client.10010.com/servicequerybusiness/operationservice/queryOcsPackageFlowLeftContentRevisedInJune",
+  "fingerprint": {
+    "kind": "text",
+    "paths": [
+      "text:numeric6"
+    ]
+  },
+  "signature": "1cba18593c16f9dc764c0cc9e60efa0a4c7e38c179ee020fe8816ab089423fa2",
+  "captured_at": "2026-10-30T20:43:17.177688+00:00",
+  "captured_from": "local-CN"
+}

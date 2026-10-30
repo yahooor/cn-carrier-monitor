@@ -16,11 +16,12 @@ jobs:
         with:
           python-version: "3.12"
       - name: 无凭据端点存活检测
+        id: liveness
         run: |
           pip install requests
           python tests/canary_endpoints.py
-      - name: 漂移时开 issue
-        if: failure()
+      - name: 漂移时开 issue（存活层）
+        if: failure() && steps.liveness.outcome == 'failure'
         uses: actions/github-script@v7
         with:
           script: |
@@ -31,3 +32,18 @@ jobs:
               body: '金丝雀检测到端点行为变化，请查看 workflow 日志并对照 docs/协议基线.md 复核。',
               labels: ['drift']
             });
+      - name: 响应结构签名对比
+        id: signature
+        run: |
+          pip install requests
+          python tests/canary_signature.py
+      - name: 漂移时开 issue（结构签名层）
+        if: failure() && steps.signature.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh label create drift --color B60205 --force 2>/dev/null || true
+          gh issue create \
+            --title "[drift] 响应结构签名变化 $(date -u +%F)" \
+            --body "结构签名金丝雀（tests/canary_signature.py）检测到响应结构与 tests/baselines/ 基线不一致：存活但换了响应形态/结构。请查看 workflow 日志中的『消失/新增的结构』清单，对照 docs/协议基线.md 复核；确认是运营商升级后，本地运行 \`python tests/canary_signature.py --bless\` 重采基线。" \
+            --label drift

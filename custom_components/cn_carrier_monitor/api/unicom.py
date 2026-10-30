@@ -133,9 +133,14 @@ def _rsa_login(value: str) -> str:
 
 
 def _parse_flow_detail(detail: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(detail, dict):
+        return {}
     """微厅余量明细 → 通用字段（流量 MB→GB）。"""
     blocks: dict[str, dict] = {}
-    for item in detail.get("resources") or []:
+    resources_node = detail.get("resources")
+    if resources_node is not None and not isinstance(resources_node, list):
+        resources_node = []
+    for item in resources_node or []:
         if isinstance(item, dict):
             blocks[str(item.get("type", "")).lower()] = item
 
@@ -191,6 +196,8 @@ def _parse_flow_detail(detail: dict[str, Any]) -> dict[str, Any]:
 
 
 def _parse_ocs_usage(payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
     """queryOcsPackageFlowLeftContent 响应解析（App Cookie 链路）。"""
     parsed: dict[str, Any] = {}
 

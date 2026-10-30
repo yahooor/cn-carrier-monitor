@@ -28,6 +28,10 @@ class CarrierAuthError(CarrierError):
         super().__init__(message, detail)
 
 
+class ParseAnomalyError(CarrierError):
+    """HTTP 200 but the response is structurally empty/unknown (protocol drift)."""
+
+
 def empty_data(carrier: str, phone: str) -> dict[str, Any]:
     """Normalized snapshot returned by every carrier client."""
     return {
