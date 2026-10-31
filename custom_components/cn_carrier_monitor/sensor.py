@@ -42,7 +42,6 @@ async def async_setup_entry(
 ) -> None:
     coordinator: CarrierDataUpdateCoordinator = hass.data[DOMAIN][entry.entry_id]
     created: set[str] = set()
-    er = hass.helpers.entity_registry.async_get(hass) if hasattr(hass, 'helpers') else None
 
     @callback
     def _sync() -> None:
