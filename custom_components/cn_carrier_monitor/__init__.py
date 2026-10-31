@@ -71,6 +71,10 @@ async def async_setup(hass: HomeAssistant, config) -> bool:
     from . import webhook as _webhook
 
     _webhook.async_register(hass)
+
+    # 集成图标（brands PR 合并前的前端覆盖方案）
+    _register_frontend_assets(hass)
+
     return True
 
 
@@ -96,3 +100,28 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if coordinator:
         await coordinator.async_shutdown()
     return unload_ok
+
+def _register_frontend_assets(hass):
+    """注册集成前端资源（图标覆盖 JS + 静态图片）。"""
+    import os
+
+    integration_path = os.path.dirname(__file__)
+
+    # JS 覆盖模块（拦截 brands 404 图标）
+    js_path = os.path.join(integration_path, "js", "icon_override.js")
+    if os.path.exists(js_path):
+        url = f"/api/custom_components/{DOMAIN}/js/icon_override.js"
+        hass.http.register_static_path(
+            url, js_path, cache_headers=False
+        )
+        # 注册为额外前端模块（HA 会自动加载）
+        hass.data.setdefault("frontend_extra_module_url", set())
+        hass.data["frontend_extra_module_url"].add(url)
+
+    # 静态图片（icon/logo PNG/SVG）
+    img_dir = os.path.join(integration_path, "images")
+    if os.path.isdir(img_dir):
+        hass.http.register_static_path(
+            f"/api/custom_components/{DOMAIN}/images", img_dir,
+            cache_headers=True
+        )
