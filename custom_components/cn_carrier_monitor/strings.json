@@ -225,6 +225,30 @@
       },
       "location": {
         "name": "归属地"
+      },
+      "last_update": {
+        "name": "数据更新时间"
+      },
+      "star_level": {
+        "name": "星级"
+      },
+      "real_name": {
+        "name": "实名状态"
+      },
+      "owe_fee": {
+        "name": "欠费金额"
+      },
+      "credit_limit": {
+        "name": "信用额度"
+      },
+      "pay_type": {
+        "name": "付费类型"
+      },
+      "special_balance": {
+        "name": "专用余额"
+      },
+      "phone_region": {
+        "name": "号码归属地"
       }
     },
     "button": {

@@ -85,6 +85,28 @@ def _desired_keys(data: dict[str, Any]) -> list[str]:
         keys.append("sms_remain")
     if data.get("points") is not None:
         keys.append("points")
+    # 归属地
+    if data.get("location"):
+        keys.append("location")
+    if data.get("plan_price"):
+        keys.append("plan_price")
+    # Round-3 新增
+    if data.get("updated_at"):
+        keys.append("last_update")
+    if data.get("star_level"):
+        keys.append("star_level")
+    if data.get("real_name"):
+        keys.append("real_name")
+    if data.get("owe_fee") is not None:
+        keys.append("owe_fee")
+    if data.get("credit_limit") is not None:
+        keys.append("credit_limit")
+    if data.get("pay_type"):
+        keys.append("pay_type")
+    if data.get("special_balance") is not None:
+        keys.append("special_balance")
+    if data.get("phone_region"):
+        keys.append("phone_region")
     return keys
 
 
@@ -303,3 +325,114 @@ class CarrierLocationSensor(CarrierSensor):
     @property
     def native_value(self):
         return self._data.get("location")
+
+# ------------------------------------------------------------------ Round-3 新增
+
+@_register("last_update")
+class CarrierLastUpdateSensor(CarrierSensor):
+    """数据更新时间（用户可直接看到数据新鲜度）。"""
+    _sensor_key = "last_update"
+    _attr_translation_key = "last_update"
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_icon = "mdi:clock-check"
+
+    @property
+    def native_value(self):
+        from datetime import datetime, timedelta, timezone
+        raw = self._data.get("updated_at")
+        if not raw:
+            return None
+        try:
+            dt = datetime.strptime(str(raw), "%Y-%m-%d %H:%M:%S")
+            return dt.replace(tzinfo=timezone(timedelta(hours=8)))
+        except (ValueError, TypeError):
+            return None
+
+
+@_register("star_level")
+class CarrierStarLevelSensor(CarrierSensor):
+    _sensor_key = "star_level"
+    _attr_translation_key = "star_level"
+    _attr_icon = "mdi:star-four-points"
+
+    @property
+    def native_value(self):
+        return self._data.get("star_level")
+
+
+@_register("real_name")
+class CarrierRealNameSensor(CarrierSensor):
+    _sensor_key = "real_name"
+    _attr_translation_key = "real_name"
+    _attr_icon = "mdi:account-check"
+
+    @property
+    def native_value(self):
+        return self._data.get("real_name")
+
+
+@_register("owe_fee")
+class CarrierOweFeeSensor(CarrierSensor):
+    _sensor_key = "owe_fee"
+    _attr_translation_key = "owe_fee"
+    _attr_device_class = SensorDeviceClass.MONETARY
+    _attr_state_class = SensorStateClass.TOTAL
+    _attr_native_unit_of_measurement = "CNY"
+    _attr_icon = "mdi:cash-minus"
+
+    @property
+    def native_value(self):
+        v = self._data.get("owe_fee")
+        return round(v, 2) if isinstance(v, (int, float)) else None
+
+
+@_register("credit_limit")
+class CarrierCreditLimitSensor(CarrierSensor):
+    _sensor_key = "credit_limit"
+    _attr_translation_key = "credit_limit"
+    _attr_device_class = SensorDeviceClass.MONETARY
+    _attr_state_class = SensorStateClass.TOTAL
+    _attr_native_unit_of_measurement = "CNY"
+    _attr_icon = "mdi:credit-card-outline"
+
+    @property
+    def native_value(self):
+        v = self._data.get("credit_limit")
+        return round(v, 2) if isinstance(v, (int, float)) else None
+
+
+@_register("pay_type")
+class CarrierPayTypeSensor(CarrierSensor):
+    _sensor_key = "pay_type"
+    _attr_translation_key = "pay_type"
+    _attr_icon = "mdi:swap-horizontal"
+
+    @property
+    def native_value(self):
+        return self._data.get("pay_type")
+
+
+@_register("special_balance")
+class CarrierSpecialBalanceSensor(CarrierSensor):
+    _sensor_key = "special_balance"
+    _attr_translation_key = "special_balance"
+    _attr_device_class = SensorDeviceClass.MONETARY
+    _attr_state_class = SensorStateClass.TOTAL
+    _attr_native_unit_of_measurement = "CNY"
+    _attr_icon = "mdi:cash-lock"
+
+    @property
+    def native_value(self):
+        v = self._data.get("special_balance")
+        return round(v, 2) if isinstance(v, (int, float)) else None
+
+
+@_register("phone_region")
+class CarrierPhoneRegionSensor(CarrierSensor):
+    _sensor_key = "phone_region"
+    _attr_translation_key = "phone_region"
+    _attr_icon = "mdi:map-marker-radius"
+
+    @property
+    def native_value(self):
+        return self._data.get("phone_region")

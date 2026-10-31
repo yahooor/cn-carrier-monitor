@@ -853,6 +853,12 @@ class UnicomCookieClient(CarrierClient):
                     val = to_float(balance.get(src_key))
                     if val is not None:
                         data["extra"][dst] = val
+                owed_amt = to_float(balance.get("allbowefeecust"))
+                if owed_amt is not None and owed_amt > 0:
+                    data["owe_fee"] = owed_amt
+                limit = to_float(balance.get("canuselimitcust"))
+                if limit is not None:
+                    data["credit_limit"] = limit
         except CarrierError as err:
             _LOGGER.debug("联通余额查询失败（忽略）: %s", err)
 

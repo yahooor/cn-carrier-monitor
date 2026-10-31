@@ -225,6 +225,30 @@
       },
       "location": {
         "name": "Location"
+      },
+      "last_update": {
+        "name": "Last update"
+      },
+      "star_level": {
+        "name": "Star level"
+      },
+      "real_name": {
+        "name": "Real name status"
+      },
+      "owe_fee": {
+        "name": "Owed fee"
+      },
+      "credit_limit": {
+        "name": "Credit limit"
+      },
+      "pay_type": {
+        "name": "Payment type"
+      },
+      "special_balance": {
+        "name": "Special balance"
+      },
+      "phone_region": {
+        "name": "Phone region"
       }
     },
     "button": {

@@ -65,6 +65,14 @@ def empty_data(carrier: str, phone: str) -> dict[str, Any]:
         "plan_name": None,
         "plan_price": None,   # 套餐月费（如 "8元/月"）
         "location": None,     # 归属地（如 湖南张家界）
+        "last_update": None,  # 数据更新时间（datetime）
+        "star_level": None,   # 星级
+        "real_name": None,    # 实名状态
+        "owe_fee": None,      # 欠费金额（元）
+        "credit_limit": None, # 信用额度（元）
+        "pay_type": None,     # 付费类型（预付费/后付费）
+        "special_balance": None,  # 专用余额（元）
+        "phone_region": None,     # 归属地完整（省+市）
         "points": None,
         "flow_general": None,  # {"used": GB, "total": GB, "remain": GB}
         "flow_directed": None,

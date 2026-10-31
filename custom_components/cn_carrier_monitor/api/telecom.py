@@ -471,6 +471,16 @@ class TelecomClient(CarrierClient):
             data["balance"] = amount
         if title:
             data["extra"]["balance_title"] = title
+        # 专用余额
+        for cl in bean.get("chargeList") or []:
+            if "专用" in str(cl.get("chargeListTitle") or ""):
+                sb = to_float(str(cl.get("chargeListCharge") or "").replace("元", ""))
+                if sb is not None:
+                    data["special_balance"] = sb
+                break
+        # 欠费
+        if arrears > 0:
+            data["owe_fee"] = arrears
         value_list = (bal.get("billExpense") or {}).get("valueList") or []
         if value_list:
             data["month_cost"] = to_float(value_list[-1].get("amount"))

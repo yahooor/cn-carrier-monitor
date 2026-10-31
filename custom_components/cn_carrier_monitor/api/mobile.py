@@ -720,6 +720,12 @@ class MobileClient(CarrierClient):
             # 本月实时话费（8 元卡 = 8.00，实测）
             if data["month_cost"] is None:
                 data["month_cost"] = to_float(fee_rsp.get("realFee"))
+            owe = to_float(fee_rsp.get("oweFee"))
+            if owe is not None and owe > 0:
+                data["owe_fee"] = owe
+            pt = fee_rsp.get("payType")
+            if pt:
+                data["pay_type"] = pt
             extra = data["extra"]
             for src_key, dst in (("oweFee", "owed"), ("payType", "pay_type"),
                                  ("userSpecBalance", "user_spec_balance")):
@@ -757,9 +763,16 @@ class MobileClient(CarrierClient):
                 extra_headers=uni_headers)
             if not qry:
                 raise CarrierError("归属地接口无响应")
-            assign = ((qry.get("data") or {}).get("resultData") or {}).get("customerAssignment")
+            rd_mq = (qry.get("data") or {}).get("resultData") or {}
+            assign = rd_mq.get("customerAssignment")
             if assign:
                 data["location"] = assign
+            star = rd_mq.get("telNumStar")
+            if star and star != "未评级":
+                data["star_level"] = star
+            tariff = rd_mq.get("tariffPackages")
+            if tariff and not data["plan_name"]:
+                data["plan_name"] = tariff
             tariff = ((qry.get("data") or {}).get("resultData") or {}).get("tariffPackages")
             if tariff and not data["plan_name"]:
                 data["plan_name"] = tariff
