@@ -27,7 +27,9 @@ def parse_safe(func):
             return func(*args, **kwargs)
         except ParseAnomalyError:
             raise
-        except (ValueError, TypeError, AttributeError, KeyError, IndexError) as err:
+        except (ValueError, TypeError, AttributeError, KeyError, IndexError,
+                ArithmeticError) as err:
+            # ArithmeticError 覆盖 OverflowError（超大数值→inf）/ZeroDivisionError
             raise ParseAnomalyError(
                 f"{func.__name__}: 响应结构异常 {type(err).__name__}: {err}") from None
 

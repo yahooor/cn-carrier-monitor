@@ -684,7 +684,27 @@ class MobileClient(CarrierClient):
             raise CarrierAuthError("mobile_session_expired")
         return finish(data)
 
+    async def _prepare_uni_headers(self) -> dict[str, str]:
+        """会话自愈前置：GET newHome 触发 uuid→d.sid 重签（Set-Cookie 由
+        _cffi_wx 回收），并提取本轮 csrf；返回 uniApi 三件套头。"""
+        uni_headers: dict[str, str] = {}
+        try:
+            page = await self._cffi_wx(
+                "https://wx.10086.cn/website/spa/main/newHome")
+            if page and page[1]:
+                m_csrf = re.search(r'"csrf":"([^"]+)"', page[1])
+                if m_csrf:
+                    uni_headers["csrf-token"] = m_csrf.group(1)
+            uni_headers[FP_HEADER_NAME] = _gen_fingerprint(
+                self._query_headers().get("User-Agent", "Chrome/126"))
+            uni_headers["Lrsbhbg8"] = LRSBHBG8_VALUE
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("移动 uniApi 头准备失败: %s", err)
+        return uni_headers
+
     async def _wx_fetch(self, data: dict[str, Any]) -> None:
+        # 自愈前置：uuid→d.sid 重签必须发生在任何查询之前（d.sid 30 分钟 TTL）
+        await self._prepare_uni_headers()
         plan = await self._wx_query(MOBILE_PLAN_URL)
         if plan:
             rd = (plan.get("object") or {}).get("resultData") or {}
@@ -708,21 +728,7 @@ class MobileClient(CarrierClient):
                     extra[dst] = val
                 elif fee_rsp.get(src_key):
                     extra[dst] = fee_rsp.get(src_key)
-        # uniApi 需三头：csrf-token（页面内联 window.user.csrf，每次加载轮换）
-        # + e76ccba…（本函数生成的关联令牌，服务器仅回显校验）+ Lrsbhbg8（bundle 常量）
-        uni_headers: dict[str, str] = {}
-        try:
-            page = await self._cffi_wx(
-                "https://wx.10086.cn/website/spa/main/newHome")
-            if page:
-                m_csrf = re.search(r'"csrf":"([^"]+)"', page[1] or "")
-                if m_csrf:
-                    uni_headers["csrf-token"] = m_csrf.group(1)
-            uni_headers[FP_HEADER_NAME] = _gen_fingerprint(
-                self._query_headers().get("User-Agent", "Chrome/126"))
-            uni_headers["Lrsbhbg8"] = LRSBHBG8_VALUE
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.debug("移动 uniApi 头准备失败: %s", err)
+        uni_headers = await self._prepare_uni_headers()
 
         margin = await self._wx_query(
             MOBILE_MARGIN_URL_V2, method="POST",
@@ -734,9 +740,10 @@ class MobileClient(CarrierClient):
         try:
             score = await self._wx_query(
                 MOBILE_SCORE_URL, top_keys={"qryInfoRsp"})
-            pv = to_float((score.get("qryInfoRsp") or {}).get("pointValue"))
-            if pv is not None:
-                data["points"] = pv
+            if score:  # _wx_query 对非 200/解析失败返回 None（Round-1 实测崩溃点）
+                pv = to_float((score.get("qryInfoRsp") or {}).get("pointValue"))
+                if pv is not None:
+                    data["points"] = pv
         except CarrierAuthError:
             raise
         except CarrierError as err:
