@@ -42,11 +42,23 @@ async def async_setup_entry(
 ) -> None:
     coordinator: CarrierDataUpdateCoordinator = hass.data[DOMAIN][entry.entry_id]
     created: set[str] = set()
+    er = hass.helpers.entity_registry.async_get(hass) if hasattr(hass, 'helpers') else None
 
     @callback
     def _sync() -> None:
+        from homeassistant.helpers import entity_registry as er_mod
+        registry = er_mod.async_get(hass)
         desired = _desired_keys(coordinator.data or {})
-        new = [k for k in desired if k not in created]
+        new = []
+        for k in desired:
+            if k in created:
+                continue
+            uid = f"{entry.entry_id}_{k}"
+            # 跳过注册表中已有同 unique_id 的实体（防止重复添加报错）
+            if registry.async_get_entity_id("sensor", DOMAIN, uid) or                registry.async_get_entity_id("button", DOMAIN, uid):
+                created.add(k)
+                continue
+            new.append(k)
         if not new:
             return
         created.update(new)
