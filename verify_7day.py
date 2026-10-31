@@ -188,21 +188,20 @@ def verify(
     if events and not in_window:
         notes.append(f"最近 {window_days} 天窗口内无事件（数据全部早于 "
                      f"{requested_start:%Y-%m-%d %H:%M}）")
-    span_events = in_window or events  # 窗口内无数据时仍给出实际跨度供排查
+    # 跨度按全部数据算：首事件早于窗口起点即说明监控已运行满 N 天，
+    # 采用 requested 窗口；否则按实际跨度评估
     effective = "requested"
-    if span_events:
-        span_start, span_end = span_events[0]["ts"], span_events[-1]["ts"]
-        span_days = (span_end - span_start).total_seconds() / 86400
-        if span_days < window_days:
+    window_start = requested_start
+    span_start = span_end = now
+    if events:
+        span_start, span_end = events[0]["ts"], events[-1]["ts"]
+        if span_end - span_start < timedelta(days=window_days):
             effective = "actual_span"
+            window_start = span_start
             notes.append(
-                f"实际数据跨度 {span_days:.2f} 天（{span_start:%Y-%m-%d %H:%M}"
-                f" ~ {span_end:%Y-%m-%d %H:%M}），不足 {window_days} 天，"
-                "按实际跨度评估")
-        window_start = span_start if effective == "actual_span" else requested_start
-    else:
-        span_start = span_end = now
-        window_start = requested_start
+                f"实际数据跨度 {(span_end - span_start).total_seconds() / 86400:.2f}"
+                f" 天（{span_start:%Y-%m-%d %H:%M} ~ {span_end:%Y-%m-%d %H:%M}），"
+                f"不足 {window_days} 天，按实际跨度评估")
     window_end = now
 
     groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
