@@ -100,6 +100,8 @@ class TelecomClient(CarrierClient):
         self._token = str(data.get("token") or "")
         self._province_code = str(data.get("province_code") or "")
         self._city_code = str(data.get("city_code") or "")
+        self._province_name = str(data.get("province_name") or "")
+        self._city_name = str(data.get("city_name") or "")
         # 短信登录（v2 接口族）运行态：uid 按号码确定性生成，避免跨步骤不一致触发 121
         import hashlib as _hashlib
 
@@ -268,6 +270,8 @@ class TelecomClient(CarrierClient):
             "token": token,
             "province_code": str(login_result.get("provinceCode") or ""),
             "city_code": str(login_result.get("cityCode") or ""),
+            "province_name": str(login_result.get("provinceName") or ""),
+            "city_name": str(login_result.get("cityName") or ""),
         }
 
     async def _login_v2(self, code: str, field_data: dict, hdr_extra: dict | None = None):
@@ -343,6 +347,8 @@ class TelecomClient(CarrierClient):
             "token": token,
             "province_code": str(login_result.get("provinceCode") or ""),
             "city_code": str(login_result.get("cityCode") or ""),
+            "province_name": str(login_result.get("provinceName") or ""),
+            "city_name": str(login_result.get("cityName") or ""),
         }
 
     # ------------------------------------------------------------------ query
@@ -471,6 +477,10 @@ class TelecomClient(CarrierClient):
             data["balance"] = amount
         if title:
             data["extra"]["balance_title"] = title
+        data["real_name"] = "已实名"
+        data["account_status"] = "正常"
+        if "欠费" in title or arrears > 0:
+            data["account_status"] = "欠费"
         # 专用余额
         for cl in bean.get("chargeList") or []:
             if "专用" in str(cl.get("chargeListTitle") or ""):
@@ -484,6 +494,10 @@ class TelecomClient(CarrierClient):
         value_list = (bal.get("billExpense") or {}).get("valueList") or []
         if value_list:
             data["month_cost"] = to_float(value_list[-1].get("amount"))
+            data["extra"]["history_bills"] = {
+                v.get("title", ""): v.get("amount", "")
+                for v in reversed(value_list) if v.get("title")
+            }
 
         # 2. 积分
         try:
@@ -552,6 +566,9 @@ class TelecomClient(CarrierClient):
             raise
         except CarrierError as err:
             _LOGGER.debug("电信流量池查询失败（忽略）: %s", err)
+
+        # 归属地
+        data["location"] = f"{self._province_name} {self._city_name}".strip() or None
 
         # 4. 语音 + 套餐名
         try:

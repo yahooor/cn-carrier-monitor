@@ -107,6 +107,8 @@ def _desired_keys(data: dict[str, Any]) -> list[str]:
         keys.append("special_balance")
     if data.get("phone_region"):
         keys.append("phone_region")
+    if data.get("account_status"):
+        keys.append("account_status")
     return keys
 
 
@@ -436,3 +438,13 @@ class CarrierPhoneRegionSensor(CarrierSensor):
     @property
     def native_value(self):
         return self._data.get("phone_region")
+
+@_register("account_status")
+class CarrierAccountStatusSensor(CarrierSensor):
+    _sensor_key = "account_status"
+    _attr_translation_key = "account_status"
+    _attr_icon = "mdi:shield-check"
+
+    @property
+    def native_value(self):
+        return self._data.get("account_status")

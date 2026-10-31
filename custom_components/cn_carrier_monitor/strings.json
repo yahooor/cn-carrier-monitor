@@ -249,6 +249,9 @@
       },
       "phone_region": {
         "name": "号码归属地"
+      },
+      "account_status": {
+        "name": "账户状态"
       }
     },
     "button": {

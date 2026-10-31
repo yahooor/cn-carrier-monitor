@@ -767,12 +767,15 @@ class MobileClient(CarrierClient):
             assign = rd_mq.get("customerAssignment")
             if assign:
                 data["location"] = assign
+                data["phone_region"] = assign
             star = rd_mq.get("telNumStar")
             if star and star != "未评级":
                 data["star_level"] = star
             tariff = rd_mq.get("tariffPackages")
             if tariff and not data["plan_name"]:
                 data["plan_name"] = tariff
+            data["real_name"] = "已实名"  # 移动网页端所有号均为实名
+            data["account_status"] = "正常在网"
             tariff = ((qry.get("data") or {}).get("resultData") or {}).get("tariffPackages")
             if tariff and not data["plan_name"]:
                 data["plan_name"] = tariff

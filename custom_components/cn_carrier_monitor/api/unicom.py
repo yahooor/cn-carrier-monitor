@@ -871,6 +871,8 @@ class UnicomCookieClient(CarrierClient):
                     round((gen or {}).get("total", 0) + (dire or {}).get("total", 0), 2),
                     round((gen or {}).get("remain", 0) + (dire or {}).get("remain", 0), 2),
                 )
+        data["real_name"] = "已实名"  # 网页登录账户必然已实名
+        data["account_status"] = "正常在网"
         if (
             data["balance"] is None
             and data["flow_general"] is None

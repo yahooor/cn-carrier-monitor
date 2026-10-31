@@ -249,6 +249,9 @@
       },
       "phone_region": {
         "name": "Phone region"
+      },
+      "account_status": {
+        "name": "Account status"
       }
     },
     "button": {
