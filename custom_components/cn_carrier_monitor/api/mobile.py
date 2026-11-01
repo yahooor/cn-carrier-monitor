@@ -679,13 +679,21 @@ class MobileClient(CarrierClient):
                     if k:
                         cookies[k] = v
             try:
+                # 配置了 proxy_url 时走同一条固定出口（d.sid IP 绑定要求
+                # 签发与使用出口一致）
+                cffi_proxies = (
+                    {"http": self._proxy, "https": self._proxy}
+                    if getattr(self, "_proxy", None) else None
+                )
                 if method == "GET":
                     r = _curl_requests.get(url, headers=headers, cookies=cookies,
-                                           impersonate="chrome", timeout=25)
+                                           impersonate="chrome", timeout=25,
+                                           proxies=cffi_proxies)
                 else:
                     r = _curl_requests.post(url, json=json_body, headers=headers,
                                             cookies=cookies,
-                                            impersonate="chrome", timeout=25)
+                                            impersonate="chrome", timeout=25,
+                                            proxies=cffi_proxies)
                 # Set-Cookie 回收：wx.10086.cn 用 uuid 令牌在任意认证 GET 上
                 # 重签 d.sid（72h 自愈链路）——不回收则续期成果丢失
                 try:

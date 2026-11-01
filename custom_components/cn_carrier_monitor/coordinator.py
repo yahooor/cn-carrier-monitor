@@ -80,7 +80,10 @@ class CarrierDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # 每个账号独立会话，避免 Cookie 串号；强制 IPv4 + 公共 DNS
         self.session = aiohttp.ClientSession(connector=build_connector(legacy_tls=True))
         try:
-            self.client = create_client(self.carrier, self.session, dict(entry.data))
+            # client 的 data 合并 options：proxy_url 等运行参数在选项里改，
+            # client 每次重建（reload/凭证续期）都能拿到最新值
+            client_data = {**dict(entry.options), **dict(entry.data)}
+            self.client = create_client(self.carrier, self.session, client_data)
         except Exception:
             # 构造失败时不能留下未关闭的会话
             hass.async_create_task(self.session.close())

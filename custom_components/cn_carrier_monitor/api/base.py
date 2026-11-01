@@ -127,6 +127,9 @@ class CarrierClient:
     def __init__(self, session: aiohttp.ClientSession, data: dict[str, Any]) -> None:
         self._session = session
         self._data = data
+        # 出站代理（可选）：d.sid 等 IP 绑定型凭据需要固定的签发/使用出口。
+        # 形如 http://192.168.31.123:7890；为空 = 直连（默认行为不变）
+        self._proxy = str(data.get("proxy_url") or "").strip() or None
 
     @property
     def phone(self) -> str:
@@ -159,6 +162,7 @@ class CarrierClient:
                 headers=merged,
                 timeout=aiohttp.ClientTimeout(total=timeout),
                 allow_redirects=False,
+                proxy=self._proxy,
             ) as resp:
                 body = await resp.text()
                 if resp.status >= 400 and not allow_error_status:

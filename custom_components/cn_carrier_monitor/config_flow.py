@@ -948,16 +948,24 @@ class ChinaCarrierMonitorOptionsFlow(_OptionsFlowBase):
     async def async_step_init(self, user_input=None):
         entry = self._target_entry
         if user_input is not None:
+            # proxy_url 空串归一为不设置（直连）
+            if not (user_input.get("proxy_url") or "").strip():
+                user_input.pop("proxy_url", None)
             return self.async_create_entry(title="", data=user_input)
         current = entry.options.get(
             CONF_INTERVAL,
             entry.data.get(CONF_INTERVAL, DEFAULT_INTERVAL),
         )
         current_secret = entry.options.get("webhook_secret", "")
+        current_proxy = entry.options.get("proxy_url", "")
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema({
                 **_interval_schema(current),
                 vol.Optional("webhook_secret", description={"suggested_value": current_secret}): str,
+                vol.Optional(
+                    "proxy_url",
+                    description={"suggested_value": current_proxy},
+                ): str,
             }),
         )

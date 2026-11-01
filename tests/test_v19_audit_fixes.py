@@ -495,3 +495,55 @@ def test_mobile_native_missing_jsessionid_still_rejected_after_curl(ha):
     """变异守卫：JSESSIONID 检查被删后此测试应失败（防整类校验被静默移除）。"""
     src = __import__("pathlib").Path(ha.config_flow.__file__).read_text(encoding="utf-8")
     assert '"JSESSIONID" not in cookie' in src
+
+
+# ---------------------------------------------------------------- 出站代理（proxy_url）
+
+
+def test_client_reads_proxy_from_data(ha, monkeypatch):
+    """client 构造时从 data.proxy_url 读代理；为空 = 直连。"""
+    base_pkg = __import__("ccm_ha.api.base", fromlist=["CarrierClient"])
+    client = base_pkg.CarrierClient(None, {"phone": PHONE, "proxy_url": "http://10.0.0.1:7890"})
+    assert client._proxy == "http://10.0.0.1:7890"
+    client2 = base_pkg.CarrierClient(None, {"phone": PHONE})
+    assert client2._proxy is None
+    client3 = base_pkg.CarrierClient(None, {"phone": PHONE, "proxy_url": "  "})
+    assert client3._proxy is None
+
+
+async def test_request_passes_proxy_to_session(ha, monkeypatch):
+    """配置了 proxy 时 _request 必须把 proxy 传给 aiohttp（d.sid IP 绑定核心链路）。"""
+    from ccm_ha.api.base import CarrierClient
+
+    seen = {}
+
+    class _Resp:
+        status = 200
+        cookies = {}
+        async def text(self):
+            return "{}"
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+
+    class _Session:
+        def request(self, method, url, **kwargs):
+            seen.update(kwargs)
+            return _Resp()
+
+    client = CarrierClient(_Session(), {"phone": PHONE, "proxy_url": "http://10.0.0.1:7890"})
+    status, body = await client._request("GET", "https://example.com")
+    assert seen.get("proxy") == "http://10.0.0.1:7890"
+
+    client2 = CarrierClient(_Session(), {"phone": PHONE})
+    await client2._request("GET", "https://example.com")
+    assert seen.get("proxy") is None
+
+
+def test_coordinator_merges_options_into_client_data(ha):
+    """coordinator 构造 client 时必须合并 entry.options（proxy_url 在选项里改）。"""
+    from pathlib import Path
+
+    src = Path(ha.coordinator.__file__).read_text(encoding="utf-8")
+    assert "**dict(entry.options)" in src, "client data 未合并 options"
