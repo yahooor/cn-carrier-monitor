@@ -19,5 +19,5 @@
     "curl_cffi>=0.9,<1.0"
   ],
   "single_config_entry": false,
-  "version": "1.6.0"
+  "version": "1.7.0"
 }
