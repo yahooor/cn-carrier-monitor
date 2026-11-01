@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+import re
 import time
 import urllib.parse
 from typing import Any
@@ -40,6 +41,7 @@ from .base import (
     CarrierAuthError,
     CarrierClient,
     CarrierError,
+    ParseAnomalyError,
     empty_data,
     finish,
     parse_safe,
@@ -49,6 +51,8 @@ from .base import (
 from .crypto import rsa_encrypt_b64
 
 _LOGGER = logging.getLogger(__name__)
+
+_NUM_RE = re.compile(r"(-?[\d.]+)")
 
 # 联通 App 登录 RSA 公钥（SPKI/DER，base64）
 UNICOM_LOGIN_PUBKEY = (
@@ -408,6 +412,23 @@ class UnicomClient(CarrierClient):
         desc = str(result.get("desc") or result.get("dsc") or "")
         raise CarrierAuthError("unicom_sms_login_failed", desc or f"code {code_v}")
 
+    # ------------------------------------------------------------------ sms state
+
+    def export_sms_state(self) -> dict[str, Any]:
+        """发码会话状态：radomLogin 校验设备一致性，换 deviceId 提交即失败。"""
+        return {
+            "device_id": getattr(self, "_sms_device_id", "") or "",
+            "app_id": self._app_id,
+        }
+
+    def import_sms_state(self, state: dict[str, Any]) -> None:
+        device_id = str(state.get("device_id") or "")
+        if device_id:
+            self._sms_device_id = device_id
+        app_id = str(state.get("app_id") or "")
+        if app_id:
+            self._app_id = app_id
+
     # ------------------------------------------------------------------ login
 
     async def async_login(self, phone: str, password: str) -> dict[str, Any]:
@@ -503,9 +524,12 @@ class UnicomClient(CarrierClient):
         if text in ("999998", "999999") or status in (401, 403):
             raise CarrierAuthError("unicom_session_expired")
         try:
-            return json.loads(body)
+            payload = json.loads(body)
         except ValueError as err:
             raise CarrierError(f"联通查询响应异常: {body[:120]}") from err
+        if not isinstance(payload, dict):
+            raise ParseAnomalyError(f"联通查询响应顶层非对象: {str(payload)[:80]}")
+        return payload
 
     async def _async_overview_seven(self) -> dict[str, Any] | None:
         """queryUserInfoSeven 概览：code=="Y" 时一次拿到余额/流量/语音/积分。"""
@@ -527,9 +551,8 @@ class UnicomClient(CarrierClient):
         def _strip_unit(value: Any) -> float | None:
             if value is None:
                 return None
-            text = str(value)
-            num = to_float(__import__("re").match(r"(-?[\d.]+)", text).group(1)) if __import__("re").match(r"(-?[\d.]+)", text) else None
-            return num
+            match = _NUM_RE.match(str(value))
+            return to_float(match.group(1)) if match else None
 
         data["balance"] = _strip_unit(payload.get("balance"))
         flow = _strip_unit(payload.get("flow"))

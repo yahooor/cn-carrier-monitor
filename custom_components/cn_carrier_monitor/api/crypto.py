@@ -63,7 +63,9 @@ def decrypt_payload(text: str, key: bytes, iv: bytes) -> str:
             candidates.append(binascii.unhexlify(stripped))
         except (ValueError, binascii.Error):
             pass
-    if stripped.endswith("=") or (len(stripped) % 4 == 0 and "=" in stripped):
+    # 不再要求出现 "="：很多接口返回的是无 padding 的 base64，
+    # 早期条件过窄导致这类响应直接当明文解析失败（→ protocol_drift 误报）
+    if len(stripped) >= 16 and re.fullmatch(r"[A-Za-z0-9+/=_-]+", stripped):
         try:
             candidates.append(b64_decode(stripped))
         except (ValueError, binascii.Error):
@@ -177,10 +179,16 @@ def parse_curl(source: str) -> dict[str, str]:
             i += 1
             if i < len(tokens):
                 method = tokens[i].strip().upper()
-        elif lowered in ("-d", "--data", "--data-raw", "--data-binary",
-                         "--data-ascii", "--data-urlencode", "-b"):
+        elif lowered in ("-b", "--cookie"):
+            # 浏览器 "Copy as cURL" 常用 -b "k=v; k2=v2" 传 Cookie，
+            # 早期把它和 -d 归在一起导致 cookie 被丢弃，广电导入直接失败
             i += 1
-            if i < len(tokens) and lowered != "-b":
+            if i < len(tokens):
+                cookie = tokens[i].strip()
+        elif lowered in ("-d", "--data", "--data-raw", "--data-binary",
+                         "--data-ascii", "--data-urlencode"):
+            i += 1
+            if i < len(tokens):
                 body = tokens[i]
         elif token.startswith("-"):
             # unknown value flags (-A, -e, -H with attached value, …) — skip

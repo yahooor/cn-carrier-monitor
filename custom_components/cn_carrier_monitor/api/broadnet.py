@@ -26,6 +26,7 @@ from .base import (
     CarrierAuthError,
     CarrierClient,
     CarrierError,
+    ParseAnomalyError,
     empty_data,
     finish,
     parse_safe,
@@ -153,7 +154,7 @@ class BroadnetClient(CarrierClient):
             raise CarrierError(f"广电查询 HTTP {status}")
         payload = _decode_body(text)
         if payload is None:
-            raise CarrierError(f"广电响应无法解析: {text[:120]}")
+            raise ParseAnomalyError(f"广电响应无法解析: {text[:120]}")
 
         outer_status = str(payload.get("status") or "")
         business = payload.get("data") if isinstance(payload.get("data"), dict) else payload
@@ -171,14 +172,16 @@ class BroadnetClient(CarrierClient):
 
     @parse_safe
     def _parse_user_res(self, business: dict[str, Any], data: dict[str, Any]) -> None:
+        # 结构问题统一归 ParseAnomalyError（protocol_drift），与"网络抖动"
+        # 区分开：前者要改解析器，后者只要重试
         if not isinstance(business, dict):
-            raise CarrierError("广电响应结构未知")
+            raise ParseAnomalyError("广电响应结构未知")
         bean = business.get("intfResultBean")
         items = (bean.get("userResList") if isinstance(bean, dict) else None) or []
         if not isinstance(items, list):
-            raise CarrierError("广电余量明细结构异常")
-        if not isinstance(items, list) or not items:
-            raise CarrierError("广电未返回可识别的余量明细")
+            raise ParseAnomalyError("广电余量明细结构异常")
+        if not items:
+            raise ParseAnomalyError("广电未返回可识别的余量明细")
 
         flow_items: list[dict[str, Any]] = []
         general_used = general_remain = 0.0
@@ -273,7 +276,7 @@ class BroadnetClient(CarrierClient):
             )
 
         if not (flow_items or data["voice"] or data["sms"]):
-            raise CarrierError("广电响应缺少可确认的余量数据")
+            raise ParseAnomalyError("广电响应缺少可确认的余量数据")
 
         # 话费余额：部分响应会附带 fee 字段
         fee = to_float(business.get("totalBalance") or business.get("balanceFee"))

@@ -703,15 +703,29 @@ class MobileClient(CarrierClient):
         return uni_headers
 
     async def _wx_fetch(self, data: dict[str, Any]) -> None:
-        # 自愈前置：uuid→d.sid 重签必须发生在任何查询之前（d.sid 30 分钟 TTL）
-        await self._prepare_uni_headers()
-        plan = await self._wx_query(MOBILE_PLAN_URL)
+        # 自愈前置：uuid→d.sid 重签必须发生在任何查询之前（d.sid 30 分钟 TTL）。
+        # 只拉一次首页：csrftoken/指纹头在本轮内复用（早期每个端点都重拉，
+        # 一次更新多打 2 个首页请求，徒增风控暴露面）。
+        uni_headers = await self._prepare_uni_headers()
+
+        async def _query(url: str, **kwargs) -> dict[str, Any] | None:
+            """单端点容错：任一接口漂移都不该让整次更新失败。"""
+            try:
+                return await self._wx_query(url, **kwargs)
+            except CarrierAuthError:
+                raise
+            except CarrierError as err:
+                _LOGGER.debug("移动网厅 %s 失败（忽略）: %s", url, err)
+                return None
+
+        plan = await _query(MOBILE_PLAN_URL)
         if plan:
             rd = (plan.get("object") or {}).get("resultData") or {}
             data["plan_name"] = rd.get("curPlanName") or None
             if rd.get("curPlanPrice"):
                 data["plan_price"] = rd.get("curPlanPrice")
-        fee = await self._wx_query(MOBILE_FEE_URL_V2)
+
+        fee = await _query(MOBILE_FEE_URL_V2)
         if fee:
             fee_rsp = (fee.get("data") or {}).get("realFeeQryRsp") or {}
             if data["balance"] is None:
@@ -734,35 +748,27 @@ class MobileClient(CarrierClient):
                     extra[dst] = val
                 elif fee_rsp.get(src_key):
                     extra[dst] = fee_rsp.get(src_key)
-        uni_headers = await self._prepare_uni_headers()
 
-        margin = await self._wx_query(
+        margin = await _query(
             MOBILE_MARGIN_URL_V2, method="POST",
             json_body={"operation": "getCustomerKeyMessage"},
             extra_headers=uni_headers)
         if margin:
             self._parse_margin(margin, data)
+
         # 积分（明文 JSON；必须走 curl_cffi 通道——wx.10086.cn 拦截 aiohttp TLS）
-        try:
-            score = await self._wx_query(
-                MOBILE_SCORE_URL, top_keys={"qryInfoRsp"})
-            if score:  # _wx_query 对非 200/解析失败返回 None（Round-1 实测崩溃点）
-                pv = to_float((score.get("qryInfoRsp") or {}).get("pointValue"))
-                if pv is not None:
-                    data["points"] = pv
-        except CarrierAuthError:
-            raise
-        except CarrierError as err:
-            _LOGGER.debug("移动积分查询失败（忽略）: %s", err)
+        score = await _query(MOBILE_SCORE_URL, top_keys={"qryInfoRsp"})
+        if score:
+            pv = to_float((score.get("qryInfoRsp") or {}).get("pointValue"))
+            if pv is not None:
+                data["points"] = pv
 
         # 归属地 / 套餐code（getMarginQueryInfo）
-        try:
-            qry = await self._wx_query(
-                MOBILE_MARGIN_QRY_URL_V2, method="POST",
-                json_body={"operation": "getCustomerKeyMessage"},
-                extra_headers=uni_headers)
-            if not qry:
-                raise CarrierError("归属地接口无响应")
+        qry = await _query(
+            MOBILE_MARGIN_QRY_URL_V2, method="POST",
+            json_body={"operation": "getCustomerKeyMessage"},
+            extra_headers=uni_headers)
+        if qry:
             rd_mq = (qry.get("data") or {}).get("resultData") or {}
             assign = rd_mq.get("customerAssignment")
             if assign:
@@ -776,11 +782,6 @@ class MobileClient(CarrierClient):
                 data["plan_name"] = tariff
             data["real_name"] = "已实名"  # 移动网页端所有号均为实名
             data["account_status"] = "正常在网"
-            tariff = ((qry.get("data") or {}).get("resultData") or {}).get("tariffPackages")
-            if tariff and not data["plan_name"]:
-                data["plan_name"] = tariff
-        except CarrierError as err:
-            _LOGGER.debug("移动归属地查询失败（忽略）: %s", err)
 
     @parse_safe
     def _parse_margin(self, payload: dict[str, Any], data: dict[str, Any]) -> None:

@@ -2,22 +2,22 @@
   "domain": "cn_carrier_monitor",
   "name": "中国运营商话费监控",
   "codeowners": [
-    "@hlhk2017"
+    "@yahooor"
   ],
   "config_flow": true,
   "dependencies": [
     "persistent_notification"
   ],
-  "documentation": "https://github.com/hlhk2017/cn-carrier-monitor",
+  "documentation": "https://github.com/yahooor/cn-carrier-monitor",
   "integration_type": "hub",
   "iot_class": "cloud_polling",
-  "issue_tracker": "https://github.com/hlhk2017/cn-carrier-monitor/issues",
+  "issue_tracker": "https://github.com/yahooor/cn-carrier-monitor/issues",
   "loggers": [
     "custom_components.cn_carrier_monitor"
   ],
   "requirements": [
-    "curl_cffi>=0.9"
+    "curl_cffi>=0.9,<1.0"
   ],
   "single_config_entry": false,
-  "version": "1.4.1"
+  "version": "1.5.0"
 }

@@ -11,7 +11,10 @@ Protocol details ported from ChinaTelecomMonitor / ha_china_comm:
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import re
+import time
 from datetime import datetime
 from typing import Any
 
@@ -68,7 +71,21 @@ LOGIN_ERROR_KEYS = {
 
 # 会话失效判定（Pocket-Carrier 验证：仅登录态类 code/关键词，避免业务提示误杀）
 AUTH_EXPIRED_CODES = ("1001", "2001", "9999", "X201", "X110")
-AUTH_EXPIRED_HINTS = ("token", "重新登录", "鉴权失败", "未登录", "登录已失效", "凭证", "会话")
+# 只匹配明确的登录态措辞：早期把裸 "token" / "会话" / "凭证" 也算命中，
+# 结果任何业务提示（如"token 校验中"）都会被误判为会话失效，进而触发
+# 不必要的短信重登与 reauth 风暴。
+AUTH_EXPIRED_HINTS = (
+    "请重新登录",
+    "重新登录",
+    "鉴权失败",
+    "未登录",
+    "登录已失效",
+    "会话已失效",
+    "凭证已失效",
+    "token失效",
+    "token已过期",
+    "token过期",
+)
 
 KB = 1024.0
 
@@ -81,7 +98,7 @@ def _kb_to_gb(value: Any) -> float | None:
 def _parse_sms_count(value: Any) -> int:
     if value is None:
         return 0
-    match = __import__("re").search(r"\d+(?:\.\d+)?", str(value))
+    match = re.search(r"\d+(?:\.\d+)?", str(value))
     try:
         return int(float(match.group(0))) if match else 0
     except (ValueError, OSError):
@@ -184,13 +201,15 @@ class TelecomClient(CarrierClient):
                 _LOGGER.debug("滑块图不完整: keys=%s", sorted(d.keys()))
                 continue
             try:
-                hx, pw, bw = _locate_notch(bg, slider)
+                # 缺口定位是纯 CPU 计算（PIL 解码 + 逐像素扫描，数百毫秒到数秒），
+                # 必须放线程池；留在事件循环里会卡住整个 HA（自动化、前端全部停摆）
+                hx, pw, bw = await asyncio.to_thread(_locate_notch, bg, slider)
             except Exception as err:  # noqa: BLE001 - image decode failure
                 _LOGGER.debug("滑块图解析失败: %s", err)
                 continue
             dist = hx / (bw - pw)
             kb = _b64.b64decode(d["extra"])
-            st = int(__import__("time").time() * 1000)
+            st = int(time.time() * 1000)
             n = 15
             track = "%".join(f"{(hx * i / n) / (bw - pw):.3f}#0.000#{st + i * 40}"
                              for i in range(1, n + 1))
@@ -222,7 +241,7 @@ class TelecomClient(CarrierClient):
                 desc = str(_hdr3.get("resultDesc") or "")
                 if code in ("0", "0000") or "成功" in desc or "60s" in desc or "重复获取" in desc:
                     return True
-            await __import__("asyncio").sleep(0.5)
+            await asyncio.sleep(0.5)
         raise CarrierError(
             "telecom_sms_send_failed",
             f"自动过滑块或下发短信失败(尝试{_attempt + 1}轮)，可改用服务密码登录",
@@ -239,11 +258,7 @@ class TelecomClient(CarrierClient):
         plain = (model_prefix + "16.1." + self._uid[:12]
                  + self.phone[:11] + ts[:14] + pad(code, 6)
                  + pad("0", 4) + pad("0.000000", 2))
-        cipher = _b64.b64encode(
-            __import__("cryptography.hazmat.primitives.serialization", fromlist=["load_der_public_key"])
-            .load_der_public_key(__import__("base64").b64decode(RSA_PUB_B64_V2))
-            .encrypt(plain.encode(), __import__("cryptography.hazmat.primitives.asymmetric.padding", fromlist=["PKCS1v15"]).PKCS1v15())
-        ).decode()
+        cipher = rsa_encrypt_b64(RSA_PUB_B64_V2, plain)
         fd = {
             "accountType": "",
             "authentication": _b64.b64encode(caesar(code).encode()).decode(),
@@ -726,8 +741,6 @@ class TelecomClient(CarrierClient):
                     - remain, 2)
                 total = round((used or 0) + (remain or 0), 2)
             elif "已用" in left and "降速" in right:
-                import re
-
                 match = re.search(r"(\d+[KMGT]B)", right)
                 total = _flow_str_to_gb(match.group(1)) if match else None
                 used = _flow_str_to_gb(item.get("leftTitleHh"))
@@ -746,7 +759,7 @@ def _flow_str_to_gb(value: Any) -> float | None:
     text = str(value or "").strip()
     if not text:
         return None
-    m = __import__("re").match(r"([\d.]+)\s*([KMGT]B)", text)
+    m = re.match(r"([\d.]+)\s*([KMGT]B)", text)
     if m:
         mult = {"KB": 1 / 1024, "MB": 1 / 1024, "GB": 1, "TB": 1024}[m.group(2)]
         return round(float(m.group(1)) * mult, 2)
