@@ -139,7 +139,7 @@ triggers:
 ### 威胁模型与凭据
 
 - 服务密码/token/cookie 存于 HA 配置条目（`.storage`，随 HA 备份）；HA 本机泄露即泄露，请保证 HA 主机访问安全
-- webhook `cn_carrier_monitor_sms`：**未配置密钥时只接受内网/回环来源**；跨网（如手机蜂窝网络回传）必须在集成**选项**里设置 `webhook_secret`，请求带同值 `X-Secret` 头或 body `secret` 字段。同一账号 10 分钟内最多提交 5 次验证码（429）
+- webhook `cn_carrier_monitor_sms`：**未配置密钥时只接受内网/回环来源**；跨网（如手机蜂窝网络回传）必须在集成**选项**里设置 `webhook_secret`，请求带同值 `X-Secret` 头或 body `secret` 字段。同一账号 10 分钟内最多提交 5 次验证码（429）。**注意**：HA 前挂反向代理（nginx/frp 等）时 `request.remote` 是代理的 127.0.0.1，"内网来源"判定会被绕过——此类部署**必须**配置 `webhook_secret`
 - 出站 TLS **默认校验证书**。若某些运营商网关使用自签/过期证书导致连接失败，可临时设置环境变量 `CN_CARRIER_INSECURE_TLS=1` 关闭校验（会失去 MITM 防护，日志持续告警）
 - 本集成仅查询个人账号数据；禁止高频轮询（见预算表）与商业用途
 
