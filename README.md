@@ -14,8 +14,11 @@
 - **四运营商**：电信（**短信验证码·自动过官方滑块** / 服务密码）、联通（**短信验证码** / 服务密码 / 小程序 openid）、移动（**短信验证码** / 服务密码 / Cookie，查询走 12.5 原生协议+refreshSession 保活）、广电（浏览器会话导入）
 - **多账号**：重复添加集成即可，每账号独立会话与设备，unique_id 唯一防重复
 - **传感器**：话费余额、本月消费、套餐名称、积分、通用/定向/总流量（剩余+已用）、语音剩余、短信剩余，附用量明细属性
+- **会话状态实体**：`session_state`（healthy / degraded / needs_human / circuit_open），永远可读——掉线自动化直接告警它，不用猜哪个数值实体变成了 unavailable
+- **自适应轮询**：认证失败后轮询间隔自动按 ×1/×2/×4/×8 拉长（封顶 24 小时），Cookie 失效的账号不再按固定间隔空转刷风控
 - **自动重新认证**：会话失效时自动发起 reauth 配置流，通知你重新登录
-- **服务**：`cn_carrier_monitor.refresh` 手动刷新（可指定 entry_id）
+- **服务**：`cn_carrier_monitor.refresh` 手动刷新（可指定 `entry_id` 或 `phone`）；`cn_carrier_monitor.inject_token` 调试/运维用，把浏览器收割的 token/Cookie 直接灌入指定号码并重载条目
+- **集成图标**：自带 `brand/` 品牌图（含暗色变体与 @2x），HA 2026.3+ 自动显示，无需任何配置
 - HACS 可装；中文界面
 
 ## 安装
@@ -76,6 +79,7 @@
 | 话费余额 | 可用余额（电信欠费时为负数） | ¥ |
 | 本月消费 | 本账期实时话费/账单合计 | ¥ |
 | 套餐名称 | 当前套餐 | - |
+| 会话状态 | healthy / degraded / needs_human / circuit_open（永远可读） | - |
 | 通用流量剩余/已用 | 含用量明细属性（总量、使用率） | GB |
 | 定向流量剩余 | GB |
 | 总流量剩余 | GB |
@@ -117,7 +121,7 @@ triggers:
 
 [![CI](https://github.com/yahooor/cn-carrier-monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/yahooor/cn-carrier-monitor/actions/workflows/ci.yml)
 
-- **契约测试**：`tests/` 以真实响应结构 fixtures 固化四运营商解析契约（42+ 用例，含上线过程中每个 bug 的回归用例）
+- **契约测试**：`tests/` 以真实响应结构 fixtures 固化四运营商解析契约（125 用例，含上线过程中每个 bug 的回归用例）
 - **CI 门禁**：ruff（含 F821 未定义名，历史上 `empty_data` 类事故的机器防线）、pytest、hassfest、HACS 校验
 - **协议基线**：[docs/协议基线.md](docs/协议基线.md)——每个密钥/端点的来源与本环境实证状态、漂移症状与防御
 
@@ -130,7 +134,7 @@ triggers:
 | 移动 | 30 分钟 | ≥5 分钟 | refreshSession 保活顺延 Cookie；单设备互斥，手机开 App 即顶号 |
 | 广电 | 60 分钟 | ≥30 分钟 | 会话约 3 天，重放请求勿高频 |
 
-连续失败 ≥5 次自动熔断 15 分钟（**含认证失败**，保护风控额度），期间实体保留最后一次数据。会话彻底失效时发**一次性**通知提示重新认证，恢复后自动消失。
+连续失败 ≥5 次自动熔断 15 分钟（**含认证失败**，保护风控额度），期间实体保留最后一次数据。认证失败期间轮询间隔自动按 ×1/×2/×4/×8 退避（封顶 24 小时）。会话彻底失效时发**一次性**通知提示重新认证，恢复后自动消失。
 
 ### 威胁模型与凭据
 
@@ -140,6 +144,18 @@ triggers:
 - 本集成仅查询个人账号数据；禁止高频轮询（见预算表）与商业用途
 
 ## 更新日志
+
+### v1.7.1（修复集成图标不显示）
+
+- **图标/logo 从未显示**：改用 HA 2026.3+ 官方的集成内 `brand/` 目录机制——品牌图（含暗色变体与 @2x）随集成分发，前端与 HACS 自动显示。此前依赖 brands CDN（该域从未收录，恒 404）+ 前端 JS 覆盖（HA 前端为 Shadow DOM，`querySelectorAll` 穿不透，方案自始无效）。
+- 移除上述死代码（`js/icon_override.js` 与静态路径注册），manifest 移除为图标 hack 引入的 `http` 依赖与 `frontend` after_dependencies。
+
+### v1.7.0（会话状态实体 + 自适应轮询）
+
+- **`session_state` 实体**：healthy / degraded / needs_human / circuit_open 四态，永远可读（掉线时正是最需要可读的时刻），自动化告警不再依赖猜测哪个实体 unavailable。
+- **认证失败自适应轮询**：间隔按 ×1/×2/×4/×8 拉长封顶 24 小时，解决 Cookie 失效账号按固定间隔无限空转的问题（线上实测联通 mall Cookie 失效后 22 小时空转 48 次）。
+- **移动端点判类三分离**：网络失败 > 结构漂移（404/410 归 `protocol_drift`）> 会话失效，不再把网络故障误报成"掉线请重新抓 Cookie"。
+- `refresh` 服务支持按 `phone` 过滤；新增 `inject_token` 运维服务；诊断包新增 `recent_events`（近 50 条事件环形缓冲）。
 
 ### v1.6.0（实体集合稳定化 + 误判修正）
 
