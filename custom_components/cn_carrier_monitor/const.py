@@ -44,6 +44,7 @@ AUTH_UNICOM_OPENID = "openid"
 AUTH_MOBILE_SMS = "sms"
 AUTH_MOBILE_PASSWORD = "password"
 AUTH_MOBILE_COOKIE = "cookie"
+AUTH_MOBILE_NATIVE = "cookie"  # 12.5 App 抓包导入：仍是 cookie 模式 + use_native 标记
 AUTH_BROADNET_SESSION = "session"
 
 DEFAULT_INTERVAL = 60  # minutes
@@ -123,6 +124,7 @@ ATTR_CARRIER = "carrier"
 
 SERVICE_REFRESH = "refresh"
 CONF_WEBHOOK_SECRET = "webhook_secret"
+CONF_USE_NATIVE = "use_native"  # mobile: 12.5 App 原生通道（clientaccess）开关
 
 # hass.data 命名空间：短信发码会话状态单独占一个顶层键。
 # 早期版本把它塞进 hass.data[DOMAIN]（该字典以 entry_id 为键存 coordinator），

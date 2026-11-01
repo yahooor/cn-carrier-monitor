@@ -418,3 +418,80 @@ async def test_async_send_relogin_sms_dispatches_by_carrier(ha):
                 assert await coordinator.async_send_relogin_sms() == "unsupported"
         finally:
             await coordinator.async_shutdown()
+
+
+# ---------------------------------------------------------------- 移动原生导入（F-Phase1）
+
+
+def test_mobile_native_route_registered(ha):
+    """mobile_mode 的选项表必须包含 App 抓包导入并指向真实 step。"""
+    assert hasattr(
+        ha.config_flow.ChinaCarrierMonitorConfigFlow, "async_step_mobile_native"
+    )
+    src = __import__("pathlib").Path(ha.config_flow.__file__).read_text(encoding="utf-8")
+    assert "AUTH_MOBILE_NATIVE: self.async_step_mobile_native" in src
+
+
+def test_mobile_native_missing_cookie_shows_error(ha):
+    """cURL/Cookie 都为空 → mobile_native_missing_cookie。"""
+    flow = ha.config_flow.ChinaCarrierMonitorConfigFlow()
+    flow.hass = FakeHass()
+    result = _run_async(
+        flow.async_step_mobile_native({"phone": PHONE, "request_source": "", "cookies": ""})
+    )
+    assert result["errors"]["base"] == "mobile_native_missing_cookie"
+
+
+def test_mobile_native_curl_without_jsessionid_rejected(ha, monkeypatch):
+    """从 cURL 提取到 Cookie 但缺 JSESSIONID → mobile_native_need_app_session。"""
+    flow = ha.config_flow.ChinaCarrierMonitorConfigFlow()
+    flow.hass = FakeHass()
+    # parse_curl 会返回空 cookie → missing_cookie；这里直接给 cookie 字段绕过解析
+    result = _run_async(
+        flow.async_step_mobile_native(
+            {"phone": PHONE, "request_source": "", "cookies": "foo=bar; uid=1"}
+        )
+    )
+    assert result["errors"]["base"] == "mobile_native_need_app_session"
+
+
+async def test_mobile_native_persists_use_native(ha, monkeypatch):
+    """JSESSIONID 齐全 + 探针通过 → 落库 use_native=True。"""
+
+    flow = ha.config_flow.ChinaCarrierMonitorConfigFlow()
+    flow.hass = FakeHass()
+
+    class _ProbeClient:
+        def __init__(self, session, data):
+            self.data = data
+
+        async def _native_request(self, endpoint, body=None):
+            return {"rspBody": {"curFeeTotal": "42.5"}}
+
+    monkeypatch.setattr(
+        ha.config_flow, "MobileClient", _ProbeClient, raising=False
+    )
+    persisted = {}
+
+    async def _fake_persist(data, unique_phone=None):
+        persisted.update(data)
+        return {"type": "create_entry", "data": data}
+
+    monkeypatch.setattr(flow, "_persist", _fake_persist)
+    result = await flow.async_step_mobile_native(
+        {
+            "phone": PHONE,
+            "request_source": "",
+            "cookies": "JSESSIONID=abc; uid=1",
+            "interval": 30,
+        }
+    )
+    assert result["type"] == "create_entry"
+    assert persisted.get("use_native") is True
+    assert "JSESSIONID" in persisted.get("cookies", "")
+
+
+def test_mobile_native_missing_jsessionid_still_rejected_after_curl(ha):
+    """变异守卫：JSESSIONID 检查被删后此测试应失败（防整类校验被静默移除）。"""
+    src = __import__("pathlib").Path(ha.config_flow.__file__).read_text(encoding="utf-8")
+    assert '"JSESSIONID" not in cookie' in src

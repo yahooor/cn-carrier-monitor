@@ -84,6 +84,16 @@
           "interval": "刷新间隔（分钟）"
         }
       },
+      "mobile_native": {
+        "title": "中国移动（App 抓包导入）",
+        "description": "推荐防掉线方案。用抓包工具（小黄鸟/Reqable 等）抓「中国移动」App 的 getFamilyCube 或 getRealFee 请求，长按「复制为 cURL」粘贴到下面（或只粘贴请求头里的 Cookie，需含 JSESSIONID）。原生通道凭据保活数周，不受网厅 30 分钟会话限制；绑定后请避免在手机上打开移动 App（会顶号）。",
+        "data": {
+          "phone": "手机号",
+          "request_source": "cURL 命令（推荐）",
+          "cookies": "或直接粘贴 Cookie（含 JSESSIONID）",
+          "interval": "刷新间隔（分钟）"
+        }
+      },
       "broadnet": {
         "title": "中国广电",
         "description": "在浏览器登录 {url} 后，在个人中心的 qryUserRes 请求上「以 cURL 格式复制」，粘贴到下面（也可分别填 URL 和 Cookie）。",
@@ -171,7 +181,9 @@
       "unicom_sms_send_failed": "短信下发失败：{reason}",
       "unicom_sms_login_failed": "短信验证码错误或已过期，请重试",
       "unicom_credentials_missing": "缺少登录凭证，请重新配置",
-      "unicom_forced_sms": "该账号已被联通强制要求短信验证码登录（新安全策略），请改用「短信验证码登录」方式：手机打开 m.client.10010.com/login-web 完成滑块后输入收到的验证码。"
+      "unicom_forced_sms": "该账号已被联通强制要求短信验证码登录（新安全策略），请改用「短信验证码登录」方式：手机打开 m.client.10010.com/login-web 完成滑块后输入收到的验证码。",
+      "mobile_native_missing_cookie": "未能从粘贴内容中提取 Cookie，请检查 cURL 是否完整",
+      "mobile_native_need_app_session": "Cookie 中缺少 JSESSIONID——原生通道需要 App 会话，请重新抓取 getFamilyCube/getRealFee 请求"
     },
     "abort": {
       "already_configured": "该账号已配置",

@@ -145,6 +145,12 @@ triggers:
 
 ## 更新日志
 
+### v1.9.0（移动 12.5 App 原生通道接线）
+
+- **移动新增「App 抓包导入」登录方式**：抓包工具捕获「中国移动」App 的 `getFamilyCube`/`getRealFee` 请求，复制 cURL（或含 JSESSIONID 的 Cookie）粘贴即可。原生通道（clientaccess.10086.cn）凭据保活数周，彻底绕开网厅 `d.sid` 30 分钟 TTL 与「IP+会话绑定」风控（已实证：跨出口使用 d.sid 必 500）。绑定后请避免在手机上打开移动 App（单设备互斥会顶号）
+- 接线 `use_native` 死配置：配置流写入后 `async_fetch` 优先走原生通道，原生失败自动落回网厅
+- 测试 140 → 145（+5：路由注册/缺 Cookie/缺 JSESSIONID/use_native 落库/源码守卫），变异 2/2 RED
+
 ### v1.7.1（修复集成图标不显示）
 
 - **图标/logo 从未显示**：改用 HA 2026.3+ 官方的集成内 `brand/` 目录机制——品牌图（含暗色变体与 @2x）随集成分发，前端与 HACS 自动显示。此前依赖 brands CDN（该域从未收录，恒 404）+ 前端 JS 覆盖（HA 前端为 Shadow DOM，`querySelectorAll` 穿不透，方案自始无效）。

@@ -84,6 +84,16 @@
           "interval": "Refresh interval (minutes)"
         }
       },
+      "mobile_native": {
+        "title": "China Mobile (App capture import)",
+        "description": "Recommended anti-disconnect method. Capture the getFamilyCube or getRealFee request from the China Mobile app with a packet sniffer (HttpCanary/Reqable), long-press 'Copy as cURL' and paste below (or paste the Cookie header only; must include JSESSIONID). Native credentials stay alive for weeks, free from the 30-minute web-session limit. After binding, avoid opening the China Mobile app on your phone (it kicks the session).",
+        "data": {
+          "phone": "Phone number",
+          "request_source": "cURL command (recommended)",
+          "cookies": "or paste Cookie directly (with JSESSIONID)",
+          "interval": "Update interval (minutes)"
+        }
+      },
       "broadnet": {
         "title": "China Broadnet",
         "description": "Log in at {url} in a browser, then copy the qryUserRes request as cURL and paste it below.",
@@ -171,7 +181,9 @@
       "unicom_sms_send_failed": "Failed to send the SMS code: {reason}",
       "unicom_sms_login_failed": "Wrong or expired SMS code",
       "unicom_credentials_missing": "Missing credentials, reconfigure the account",
-      "unicom_forced_sms": "This account is forced to SMS-code login by China Unicom. Use the SMS login method instead: open m.client.10010.com/login-web on your phone, complete the slider, then enter the received code."
+      "unicom_forced_sms": "This account is forced to SMS-code login by China Unicom. Use the SMS login method instead: open m.client.10010.com/login-web on your phone, complete the slider, then enter the received code.",
+      "mobile_native_missing_cookie": "Could not extract a Cookie from the pasted content; check that the cURL is complete",
+      "mobile_native_need_app_session": "Cookie is missing JSESSIONID — the native channel requires an app session; re-capture the getFamilyCube/getRealFee request"
     },
     "abort": {
       "already_configured": "This account is already configured",

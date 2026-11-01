@@ -461,6 +461,7 @@ def _install_voluptuous() -> None:
     vol.Any = lambda *args, **kwargs: None
     vol.Coerce = lambda t, msg=None: t
     vol.Range = lambda min=None, max=None, msg=None: None
+    vol.Match = lambda pattern, msg=None: lambda v: v
     # webhook/config_flow 的 except vol.Invalid 分支需要该名字存在
     class Invalid(ValueError):
         """Stub for voluptuous.Invalid (schema validation failure)."""

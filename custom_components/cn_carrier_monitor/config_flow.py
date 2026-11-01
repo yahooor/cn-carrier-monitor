@@ -31,6 +31,7 @@ from .api import (
 from .const import (
     AUTH_BROADNET_SESSION,
     AUTH_MOBILE_COOKIE,
+    AUTH_MOBILE_NATIVE,
     AUTH_MOBILE_PASSWORD,
     AUTH_MOBILE_SMS,
     AUTH_TELECOM_PASSWORD,
@@ -56,6 +57,7 @@ from .const import (
     CONF_PHONE,
     CONF_PROVINCE_CODE,
     CONF_TOKEN,
+    CONF_USE_NATIVE,
     DATA_SMS_STATE,
     DEFAULT_INTERVAL,
     DOMAIN,
@@ -610,6 +612,7 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 AUTH_MOBILE_SMS: self.async_step_mobile_sms,
                 AUTH_MOBILE_PASSWORD: self.async_step_mobile_password,
                 AUTH_MOBILE_COOKIE: self.async_step_mobile_cookie,
+                AUTH_MOBILE_NATIVE: self.async_step_mobile_native,
             }[user_input["mode"]]()
         return self.async_show_form(
             step_id="mobile_mode",
@@ -620,6 +623,7 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             AUTH_MOBILE_SMS: "短信验证码登录（推荐）",
                             AUTH_MOBILE_PASSWORD: "服务密码登录",
                             AUTH_MOBILE_COOKIE: "粘贴浏览器 Cookie",
+                            AUTH_MOBILE_NATIVE: "App 抓包导入（长效，推荐防掉线）",
                         }
                     )
                 }
@@ -773,6 +777,83 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 }
             ),
             errors=errors,
+        )
+
+    async def async_step_mobile_native(self, user_input=None):
+        """移动 12.5 App 抓包导入：粘贴 getFamilyCube/realFeeQuery 的 cURL 或 Cookie。
+
+        原生通道（clientaccess.10086.cn）凭据不与出口 IP 绑定、保活数周，
+        彻底绕开 wx 网厅 d.sid 30 分钟 TTL + IP 绑定风控。落库打
+        ``use_native: true``，async_fetch 优先走 _native_fetch。
+        """
+        errors: dict = {}
+        data: dict = {}
+        if user_input is not None:
+            phone = user_input[CONF_PHONE]
+            source = user_input.get("request_source", "").strip()
+            cookie = user_input.get(CONF_COOKIES, "").strip()
+            # cURL 优先（getFamilyCube 的 Copy as cURL），从 -H "Cookie: ..." 或
+            # -b "..." 提取；纯 Cookie 串也可（含 JSESSIONID 的头值）
+            if source and not cookie:
+                from .api.crypto import parse_curl
+
+                try:
+                    parsed = parse_curl(source)
+                    cookie = parsed.get("cookie") or ""
+                except Exception as err:  # noqa: BLE001 - 解析失败按表单错误呈现
+                    _LOGGER.debug("移动原生导入 cURL 解析失败: %s", err)
+            if not cookie:
+                errors["base"] = "mobile_native_missing_cookie"
+            elif "JSESSIONID" not in cookie:
+                # 原生签名依赖 JSESSIONID 参与 x-sign，缺失必失败
+                errors["base"] = "mobile_native_need_app_session"
+            else:
+                session = aiohttp.ClientSession(connector=build_connector(legacy_tls=True))
+                try:
+                    client = MobileClient(
+                        session,
+                        {
+                            "phone": phone,
+                            CONF_AUTH_MODE: AUTH_MOBILE_COOKIE,
+                            CONF_COOKIES: cookie,
+                            "use_native": True,
+                        },
+                    )
+                    # 原生探针：直接调 realFeeQuery 验证凭据（不落库）
+                    await client._native_request(
+                        "biz-orange/BN/realFeeQuery/getRealFee", {"cellNum": phone}
+                    )
+                    data = {
+                        CONF_CARRIER: CARRIER_MOBILE,
+                        CONF_AUTH_MODE: AUTH_MOBILE_COOKIE,
+                        CONF_PHONE: phone,
+                        CONF_COOKIES: cookie,
+                        CONF_USE_NATIVE: True,
+                        CONF_INTERVAL: int(
+                            user_input.get(CONF_INTERVAL, DEFAULT_INTERVAL)
+                        ),
+                    }
+                except CarrierAuthError:
+                    errors["base"] = "mobile_session_expired"
+                except CarrierError as err:
+                    errors["base"] = "cannot_connect"
+                    _LOGGER.warning("移动原生凭据校验失败: %s", err)
+                finally:
+                    await session.close()
+            if not errors and data:
+                return await self._persist(data)
+        return self.async_show_form(
+            step_id="mobile_native",
+            data_schema=vol.Schema(
+                {
+                    **_phone_schema(self._phone),
+                    vol.Optional("request_source", default=""): str,
+                    vol.Optional(CONF_COOKIES, default=""): str,
+                    **_interval_schema(),
+                }
+            ),
+            errors=errors,
+            description_placeholders={"url": "getFamilyCube / getRealFee"},
         )
 
     # ------------------------------------------------------------------ broadnet
