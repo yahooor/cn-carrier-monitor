@@ -382,7 +382,8 @@ def test_build_relogin_client_exists_for_sms_carriers(ha):
 
 async def test_async_send_relogin_sms_dispatches_by_carrier(ha):
     """telecom → async_login_sms_send；unicom → async_sms_trigger；mobile → unsupported。"""
-    from ha_stub import ConfigEntry as CE, FakeHass as FH
+    from ha_stub import ConfigEntry as CE
+    from ha_stub import FakeHass as FH
 
     for carrier, expect_sent in (("telecom", True), ("unicom", True), ("mobile", False)):
         entry = CE(
