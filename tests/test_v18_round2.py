@@ -262,6 +262,11 @@ async def test_refresh_service_filters_by_phone(ha):
     await handler(_Call({"entry_id": entry.entry_id, "phone": "19900000000"}))
     assert calls == ["updated", "updated"]
 
+    # coordinator 持有真实 ClientSession，测试结束前必须关闭
+    for c in created:
+        if not c.session.closed:
+            await c.session.close()
+
 
 # ---------------------------------------------------------------- F6 诊断事件摘要
 

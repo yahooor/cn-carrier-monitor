@@ -86,7 +86,8 @@ def empty_data(carrier: str, phone: str) -> dict[str, Any]:
 
 
 def finish(data: dict[str, Any]) -> dict[str, Any]:
-    data["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # astimezone() 保证带本地时区偏移，跨时区日志/诊断不再有歧义
+    data["updated_at"] = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
     return data
 
 
@@ -164,6 +165,9 @@ class CarrierClient:
                     raise CarrierError(f"{url} HTTP {resp.status}")
                 if resp.status >= 400:
                     _LOGGER.debug("%s HTTP %s: %s", url, resp.status, body[:200])
+                # Set-Cookie 交给子类回收（如移动 wx 通道的 uuid→d.sid 重签）；
+                # 空实现兜底，不影响不关心 Cookie 的运营商
+                self.absorb_cookies(getattr(resp, "cookies", None))
                 return resp.status, body
         except aiohttp.ClientSSLError as err:
             # 证书校验失败是配置/环境问题，不该被当成"运营商改协议"反复重试
@@ -175,6 +179,9 @@ class CarrierClient:
             raise CarrierError(f"网络错误: {err}") from err
         except TimeoutError as err:
             raise CarrierError(f"请求超时: {url}") from err
+
+    def absorb_cookies(self, cookies: Any) -> None:
+        """Hook for subclasses to merge Set-Cookie from a response (base: no-op)."""
 
     async def async_fetch(self) -> dict[str, Any]:
         """Fetch one normalized snapshot; raise CarrierAuthError on reauth."""

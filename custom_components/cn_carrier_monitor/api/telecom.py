@@ -204,6 +204,8 @@ class TelecomClient(CarrierClient):
                 # 缺口定位是纯 CPU 计算（PIL 解码 + 逐像素扫描，数百毫秒到数秒），
                 # 必须放线程池；留在事件循环里会卡住整个 HA（自动化、前端全部停摆）
                 hx, pw, bw = await asyncio.to_thread(_locate_notch, bg, slider)
+                if bw <= pw:
+                    raise ValueError(f"slider width {pw} >= background {bw}")
             except Exception as err:  # noqa: BLE001 - image decode failure
                 _LOGGER.debug("滑块图解析失败: %s", err)
                 continue
@@ -347,7 +349,12 @@ class TelecomClient(CarrierClient):
         if resp_data.get("resultCode") != "0000":
             code = str(resp_data.get("resultCode") or "")
             if code in LOGIN_ERROR_KEYS:
-                raise CarrierAuthError(LOGIN_ERROR_KEYS[code])
+                # 3005/3007/3008/3009 是风控/频控（需滑块或稍后再试），不是
+                # 会话失效——打上 reason 子类供事件日志区分，避免通知把用户
+                # 引向"重新登录"这个无效动作
+                raise CarrierAuthError(
+                    LOGIN_ERROR_KEYS[code], detail=f"rate_limit:{code}"
+                )
             fail = (resp_data.get("data") or {}).get("loginFailResult") or {}
             reason = str(fail.get("reason") or resp_data.get("resultDesc") or code)
             # 服务端明确拒绝（含"手机号或密码有误"）→ 归类为凭据错误

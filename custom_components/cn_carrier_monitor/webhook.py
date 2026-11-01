@@ -27,7 +27,11 @@ from typing import Any
 
 import aiohttp
 import voluptuous as vol
-from aiohttp.web import Request
+
+# 注意：HA 的 homeassistant.components.webhook 模块**没有** json_response——
+# 7 处错误响应曾误用 `webhook.json_response`，运行时全部 AttributeError，
+# 被 HA 的兜底 except 吞成 200，转发器永远看到"成功"。
+from aiohttp.web import Request, json_response
 from homeassistant.components import webhook
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -148,7 +152,7 @@ async def async_handle_webhook(
         payload = _SCHEMA(await request.json())
     except (ValueError, vol.Invalid) as err:
         _LOGGER.warning("短信 webhook 载荷无效: %s", err)
-        return webhook.json_response({"ok": False, "error": "invalid_payload"}, status=400)
+        return json_response({"ok": False, "error": "invalid_payload"}, status=400)
 
     code = str(payload["code"]).strip()
     phone = str(payload["phone"]).strip()
@@ -161,39 +165,53 @@ async def async_handle_webhook(
         candidates = [e for e in candidates if e.data.get("phone") == phone]
     if not candidates:
         _LOGGER.warning("短信 webhook 没有匹配的短信模式账号 (phone=%s)", phone or "*")
-        return webhook.json_response({"ok": False, "error": "no_matching_account"}, status=404)
+        return json_response({"ok": False, "error": "no_matching_account"}, status=404)
     if len(candidates) > 1 and not phone:
-        return webhook.json_response(
+        return json_response(
             {"ok": False, "error": "multiple_accounts_need_phone"}, status=400
         )
 
     entry = candidates[0]
     expected = _entry_secret(entry)
     if expected:
-        if not hmac.compare_digest(provided_secret, expected):
-            return webhook.json_response({"ok": False, "error": "bad_secret"}, status=403)
+        # compare_digest 的 str 版只接受 ASCII：用户配中文/emoji 密钥会
+        # TypeError → 500。统一编码为字节后比较
+        if not hmac.compare_digest(
+            provided_secret.encode("utf-8"), expected.encode("utf-8")
+        ):
+            return json_response({"ok": False, "error": "bad_secret"}, status=403)
     elif not _is_local(request):
         # 未配密钥 + 来自公网：直接拒绝（验证码是账号登录凭据）
         _LOGGER.warning(
             "短信 webhook 拒绝公网请求（未配置 webhook_secret）: remote=%s",
             request.remote,
         )
-        return webhook.json_response(
+        return json_response(
             {"ok": False, "error": "secret_required"}, status=403
         )
 
     if _rate_limited(phone or entry.entry_id):
         _LOGGER.warning("短信 webhook 触发限频: %s", entry.title)
-        return webhook.json_response({"ok": False, "error": "rate_limited"}, status=429)
+        return json_response({"ok": False, "error": "rate_limited"}, status=429)
 
     try:
         updates = await _relogin(hass, entry, code)
     except Exception as err:  # noqa: BLE001 - 对外只给分类，细节进日志
         _LOGGER.warning("短信自动重登失败: %s", err)
-        return webhook.json_response({"ok": False, "error": "relogin_failed"}, status=500)
+        return json_response({"ok": False, "error": "relogin_failed"}, status=500)
     _LOGGER.info("短信 webhook 重登成功: %s", entry.title)
-    return webhook.json_response({"ok": True, "account": entry.title,
-                                  "updated": sorted(updates)})
+    # 重登成功 → reload 新建了 coordinator（_needs_human_notified=False），
+    # 旧"需要人工"通知没人撤，必须在这里显式 dismiss，否则永久挂在界面上
+    try:
+        from homeassistant.components.persistent_notification import (
+            async_dismiss as pn_dismiss,
+        )
+
+        pn_dismiss(hass, f"{DOMAIN}_reauth_{entry.entry_id}")
+    except Exception as err:  # noqa: BLE001 - 清理失败不影响重登结果
+        _LOGGER.debug("重登后清理掉线通知失败: %s", err)
+    return json_response({"ok": True, "account": entry.title,
+                          "updated": sorted(updates)})
 
 
 def async_register(hass: HomeAssistant) -> None:

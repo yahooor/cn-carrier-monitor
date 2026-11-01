@@ -150,7 +150,9 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     return await self.async_step_telecom_sms_code()
             route = {
                 (CARRIER_TELECOM, AUTH_TELECOM_PASSWORD): "telecom",
-                (CARRIER_TELECOM, AUTH_TELECOM_SMS): "telecom_sms",
+                # 路由值必须指向真实存在的 step（此前写成 "telecom_sms"，
+                # 该 step 不存在 → reauth getattr 直接 AttributeError 崩溃）
+                (CARRIER_TELECOM, AUTH_TELECOM_SMS): "telecom_sms_phone",
                 (CARRIER_UNICOM, AUTH_UNICOM_PASSWORD): "unicom",
                 (CARRIER_UNICOM, AUTH_UNICOM_SMS): "unicom_sms",
                 (CARRIER_UNICOM, AUTH_UNICOM_COOKIE): "unicom_cookie",
@@ -493,7 +495,9 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             finally:
                 await session.close()
             if not errors:
-                return await self.async_step_unicom_sms_code(hint)
+                # 提示语走实例属性（step 方法只接受 user_input 一个位置参数）
+                self._sms_hint = hint
+                return await self.async_step_unicom_sms_code()
         placeholders.setdefault("reason", "")
         placeholders.setdefault("url", "m.client.10010.com/login-web")
         return self.async_show_form(
@@ -508,8 +512,13 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             description_placeholders=placeholders,
         )
 
-    async def async_step_unicom_sms_code(self, hint="", user_input=None):
-        """联通短信登录第二步：输入验证码。"""
+    async def async_step_unicom_sms_code(self, user_input=None):
+        """联通短信登录第二步：输入验证码。
+
+        HA flow manager 以**单个位置参数**调用 step（`step(user_input)`）。
+        此前签名带 `hint` 形参：用户提交验证码时 dict 落在 hint 上、
+        user_input 恒为 None → 表单永远重渲染死循环。提示语改走实例属性。
+        """
         errors = {}
         if user_input is not None:
             code = user_input["code"].strip()
@@ -548,7 +557,10 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 }
             ),
             errors=errors,
-            description_placeholders={"hint": hint, "url": "m.client.10010.com/login-web"},
+            description_placeholders={
+                "hint": getattr(self, "_sms_hint", ""),
+                "url": "m.client.10010.com/login-web",
+            },
         )
 
     async def async_step_unicom_cookie(self, user_input=None):
@@ -773,30 +785,34 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             cookie = user_input.get(CONF_COOKIES, "").strip()
             session = aiohttp.ClientSession(connector=build_connector(legacy_tls=True))
             normalized = None
+            # 整个流程（含 parse_import）必须在 finally 里关会话——此前
+            # parse_import 抛错时 normalized is None 直接跳过内层 finally，
+            # 每粘贴一次无效 cURL 泄漏一个 ClientSession
             try:
-                normalized = BroadnetClient.parse_import(source, cookie)
-            except CarrierError as err:
-                errors["base"] = "broadnet_import_invalid"
-                _LOGGER.warning("广电会话导入解析失败: %s", err)
-            if normalized is not None:
                 try:
-                    phone = user_input.get(CONF_PHONE) or ""
-                    client = BroadnetClient(session, {"phone": phone, **normalized})
-                    await client.async_fetch()
-                    data = {
-                        CONF_CARRIER: CARRIER_BROADNET,
-                        CONF_AUTH_MODE: AUTH_BROADNET_SESSION,
-                        CONF_PHONE: phone,
-                        **normalized,
-                        CONF_INTERVAL: int(user_input.get(CONF_INTERVAL, DEFAULT_INTERVAL)),
-                    }
-                except CarrierAuthError:
-                    errors["base"] = "broadnet_session_expired"
+                    normalized = BroadnetClient.parse_import(source, cookie)
                 except CarrierError as err:
-                    errors["base"] = "broadnet_query_failed"
-                    _LOGGER.warning("广电查询失败: %s", err)
-                finally:
-                    await session.close()
+                    errors["base"] = "broadnet_import_invalid"
+                    _LOGGER.warning("广电会话导入解析失败: %s", err)
+                if normalized is not None:
+                    try:
+                        phone = user_input.get(CONF_PHONE) or ""
+                        client = BroadnetClient(session, {"phone": phone, **normalized})
+                        await client.async_fetch()
+                        data = {
+                            CONF_CARRIER: CARRIER_BROADNET,
+                            CONF_AUTH_MODE: AUTH_BROADNET_SESSION,
+                            CONF_PHONE: phone,
+                            **normalized,
+                            CONF_INTERVAL: int(user_input.get(CONF_INTERVAL, DEFAULT_INTERVAL)),
+                        }
+                    except CarrierAuthError:
+                        errors["base"] = "broadnet_session_expired"
+                    except CarrierError as err:
+                        errors["base"] = "broadnet_query_failed"
+                        _LOGGER.warning("广电查询失败: %s", err)
+            finally:
+                await session.close()
             if not errors and data:
                 return await self._persist(data)
         return self.async_show_form(

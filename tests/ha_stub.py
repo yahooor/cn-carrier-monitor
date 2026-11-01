@@ -459,6 +459,13 @@ def _install_voluptuous() -> None:
     vol.In = lambda *args, **kwargs: None
     vol.All = lambda *args, **kwargs: None
     vol.Any = lambda *args, **kwargs: None
+    vol.Coerce = lambda t, msg=None: t
+    vol.Range = lambda min=None, max=None, msg=None: None
+    # webhook/config_flow 的 except vol.Invalid 分支需要该名字存在
+    class Invalid(ValueError):
+        """Stub for voluptuous.Invalid (schema validation failure)."""
+
+    vol.Invalid = Invalid
 
 
 def install() -> None:
@@ -480,7 +487,34 @@ def install() -> None:
             HomeAssistant=FakeHass, callback=callback, ServiceCall=object)
     _module("homeassistant.const",
             PERCENTAGE="%", UnitOfInformation=UnitOfInformation, __version__="stub")
-    _module("homeassistant.config_entries", ConfigEntry=ConfigEntry)
+    class _StubConfigFlow:
+        """config_entries.ConfigFlow 桩：支持 domain 关键字与 async_show_form。"""
+
+        # 真实 ConfigFlow 用 __init_subclass__ 接收 domain=...；桩里存起来即可
+        def __init_subclass__(cls, **kwargs: Any) -> None:
+            super().__init_subclass__()
+            cls._flow_domain = kwargs.get("domain")
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self.hass = None
+
+        def async_show_form(self, *, step_id, data_schema=None, errors=None,
+                            description_placeholders=None):
+            return {"type": "form", "step_id": step_id, "errors": errors or {}}
+
+        def async_create_entry(self, *, title=None, data=None):
+            return {"type": "create_entry", "title": title, "data": data}
+
+        def async_abort(self, *, reason=None):
+            return {"type": "abort", "reason": reason}
+
+        async def async_set_unique_id(self, uid):
+            self._unique_id = uid
+
+    _module("homeassistant.config_entries", ConfigEntry=ConfigEntry,
+            ConfigFlow=_StubConfigFlow,
+            OptionsFlow=type("OptionsFlow", (), {}),
+            OptionsFlowWithConfigEntry=type("OptionsFlowWithConfigEntry", (), {}))
     _module("homeassistant.util")
     _module("homeassistant.util.dt", get_default_time_zone=lambda: None)
 
@@ -492,9 +526,18 @@ def install() -> None:
     _module("homeassistant.components.button", ButtonEntity=SensorEntity)
     _module("homeassistant.components.persistent_notification",
             async_create=pn_async_create, async_dismiss=pn_async_dismiss)
-    _module("homeassistant.components.webhook", async_register=lambda *a, **k: None)
+
+    def _webhook_register(hass, domain, name, webhook_id, handler, **kwargs):
+        # 记录 handler 供 webhook 全链路测试直接调用
+        sys.modules.setdefault(
+            "__ha_stub_state", types.SimpleNamespace(webhook_handlers={})
+        ).webhook_handlers[webhook_id] = handler
+
+    _module("homeassistant.components.webhook", async_register=_webhook_register)
 
     _module("homeassistant.helpers")
+    _module("homeassistant.helpers.aiohttp_client",
+            async_get_clientsession=lambda hass: None)
     _module("homeassistant.helpers.config_validation",
             config_entry_only_config_schema=lambda domain: {},
             string=str)

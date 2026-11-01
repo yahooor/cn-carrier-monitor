@@ -454,50 +454,6 @@ class CarrierDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             notification_id=f"{DOMAIN}_sms_{self.entry.entry_id}",
         )
 
-    def _build_relogin_client(self):
-        from .api import TelecomClient, UnicomClient
-
-        if self.carrier == "telecom":
-            return TelecomClient(self.session, dict(self.entry.data))
-        if self.carrier == "unicom":
-            return UnicomClient(self.session, dict(self.entry.data))
-        return None
-
-    async def async_complete_sms_relogin(self, code: str) -> bool:
-        """用新验证码完成重登并写回条目。"""
-        client = self._build_relogin_client()
-        if client is None:
-            return False
-        if self.carrier == "telecom":
-            # 验证码绑定发码会话（uid/key/isct）——必须恢复同状态提交
-            self._import_saved_sms_state(client)
-            creds = await client.async_login_sms_submit(code)
-            updates = {
-                "token": creds["token"],
-                "province_code": creds["province_code"],
-                "city_code": creds["city_code"],
-            }
-        else:
-            self._import_saved_sms_state(client)
-            creds = await client.async_sms_login(code)
-            updates = {"token": creds["token"], "app_id": creds.get("app_id", "")}
-            updates = {k: v for k, v in updates.items() if v}
-        new_data = {**self.entry.data, **updates}
-        self.hass.config_entries.async_update_entry(self.entry, data=new_data)
-        # 重建 client 以载入新 token
-        self.client = create_client(self.carrier, self.session, dict(new_data))
-        # 人工重登成功后清零退避计数，否则下一次失效仍按最长冷却等待
-        self._fail_streak = 0
-        self._auth_fail_streak = 0
-        self._last_sms_sent_at = 0.0
-        await self.async_request_refresh()
-        from homeassistant.components.persistent_notification import (
-            async_dismiss as pn_dismiss,
-        )
-
-        pn_dismiss(self.hass, f"{DOMAIN}_sms_{self.entry.entry_id}")
-        return True
-
     def _import_saved_sms_state(self, client) -> None:
         from .const import DATA_SMS_STATE
 

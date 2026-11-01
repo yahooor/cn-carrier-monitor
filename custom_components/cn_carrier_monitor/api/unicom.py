@@ -139,9 +139,9 @@ def _rsa_login(value: str) -> str:
 
 @parse_safe
 def _parse_flow_detail(detail: dict[str, Any]) -> dict[str, Any]:
+    """微厅余量明细 → 通用字段（流量 MB→GB）。"""
     if not isinstance(detail, dict):
         return {}
-    """微厅余量明细 → 通用字段（流量 MB→GB）。"""
     blocks: dict[str, dict] = {}
     resources_node = detail.get("resources")
     if resources_node is not None and not isinstance(resources_node, list):
@@ -203,9 +203,9 @@ def _parse_flow_detail(detail: dict[str, Any]) -> dict[str, Any]:
 
 @parse_safe
 def _parse_ocs_usage(payload: dict[str, Any]) -> dict[str, Any]:
+    """queryOcsPackageFlowLeftContent 响应解析（App Cookie 链路）。"""
     if not isinstance(payload, dict):
         return {}
-    """queryOcsPackageFlowLeftContent 响应解析（App Cookie 链路）。"""
     parsed: dict[str, Any] = {}
 
     def collect(details: Any) -> tuple[list, list, list]:

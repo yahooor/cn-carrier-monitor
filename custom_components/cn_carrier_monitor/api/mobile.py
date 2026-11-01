@@ -365,6 +365,22 @@ class MobileClient(CarrierClient):
         if changed:
             self._cookie = "; ".join(f"{k}={v}" for k, v in merged.items())
 
+    def absorb_cookies(self, cookies: Any) -> None:
+        """aiohttp fallback 路径的 Set-Cookie 回收。
+
+        curl_cffi 不可用时走 base._request（aiohttp），此时 uuid→d.sid
+        重签必须同样回收，否则 72h 自愈链路在该环境静默失效。
+        """
+        if not cookies:
+            return
+        fresh: dict[str, str] = {}
+        try:
+            for name, cookie in cookies.items():
+                fresh[name] = cookie.value
+        except AttributeError:  # 已经是普通 dict
+            fresh = dict(cookies)
+        self._merge_cookies(fresh)
+
     def _parse_cookie_header(self) -> dict[str, str]:
         jar: dict[str, str] = {}
         for part in self._cookie.split(";"):

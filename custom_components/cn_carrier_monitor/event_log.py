@@ -1,9 +1,11 @@
-"""结构化更新事件日志：失败四分类 + 落盘 JSONL。
+"""结构化更新事件日志：失败分类 + 落盘 JSONL。
 
 每次 coordinator 更新结果追加一行 JSON 到 HA 配置目录下的
-``cn_carrier_monitor_events.jsonl``；失败必须归入四类之一：
+``cn_carrier_monitor_events.jsonl``；失败必须归入五类之一：
 
-- auth_expired:   CarrierAuthError（会话/凭证失效）
+- auth_expired:   CarrierAuthError（会话/凭证失效；风控子类除外）
+- rate_limit:     CarrierAuthError 且 detail 为 rate_limit:*（需滑块/操作频繁，
+                  凭据有效、重登无效）
 - protocol_drift: ParseAnomalyError（HTTP 200 但响应结构全空/未知/解密失败）
 - network:        连接/DNS/TLS/超时（aiohttp ClientError、TimeoutError、
                   客户端封装的"网络错误/请求超时"CarrierError）
@@ -33,6 +35,8 @@ CATEGORY_AUTH = "auth_expired"
 CATEGORY_DRIFT = "protocol_drift"
 CATEGORY_NETWORK = "network"
 CATEGORY_INTERNAL = "internal"
+# 风控/频控（telecom 3005 需滑块 / 3007 操作频繁等）：凭据有效，重登无效
+CATEGORY_RATE_LIMIT = "rate_limit"
 
 EVENT_SUCCESS = "update_success"
 EVENT_FAILURE = "update_failure"
@@ -47,6 +51,11 @@ def classify_exception(err: BaseException) -> str:
     from .api.base import CarrierAuthError, CarrierError, ParseAnomalyError
 
     if isinstance(err, CarrierAuthError):
+        # 风控/频控子类（如电信 3005 需滑块 / 3007 操作频繁）：凭据本身有效，
+        # 归 auth_expired 会把用户引向"重新登录"这个无效动作
+        detail = str(getattr(err, "detail", "") or "")
+        if detail.startswith("rate_limit:"):
+            return CATEGORY_RATE_LIMIT
         return CATEGORY_AUTH
     if isinstance(err, ParseAnomalyError):
         return CATEGORY_DRIFT
@@ -77,7 +86,8 @@ async def emit(hass: Any, event_type: str, data: dict[str, Any]) -> None:
     """追加一条事件记录；任何失败都只降级为 debug 日志，绝不影响更新流程。"""
     try:
         record = {
-            "ts": datetime.now().isoformat(timespec="seconds"),
+            # 带本地时区：跨时区/夏令时诊断不再有歧义（sensor 的 last_update 已同此）
+            "ts": datetime.now().astimezone().isoformat(timespec="seconds"),
             "event": event_type,
             **data,
         }

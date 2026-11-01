@@ -24,6 +24,7 @@ from .const import (
     CONF_REQUEST_BODY,
     CONF_REQUEST_URL,
     CONF_TOKEN,
+    CONF_WEBHOOK_SECRET,
     DOMAIN,
 )
 from .event_log import FILE_NAME, MAX_RECENT_EVENTS
@@ -38,6 +39,7 @@ SENSITIVE_KEYS = {
     CONF_APP_ID,
     CONF_REQUEST_BODY,
     CONF_REQUEST_URL,
+    CONF_WEBHOOK_SECRET,
     "device_id",
     "phone_detected",
 }
