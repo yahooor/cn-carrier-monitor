@@ -211,14 +211,26 @@
       "flow_directed_remain": {
         "name": "Directed data remaining"
       },
+      "flow_directed_used": {
+        "name": "Directed data used"
+      },
       "flow_total_remain": {
         "name": "Total data remaining"
+      },
+      "flow_total_used": {
+        "name": "Total data used"
       },
       "voice_remain": {
         "name": "Voice remaining"
       },
+      "voice_used": {
+        "name": "Voice used"
+      },
       "sms_remain": {
         "name": "SMS remaining"
+      },
+      "sms_used": {
+        "name": "SMS used"
       },
       "plan_price": {
         "name": "Plan price"

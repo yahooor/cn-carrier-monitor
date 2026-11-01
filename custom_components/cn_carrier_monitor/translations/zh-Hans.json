@@ -211,14 +211,26 @@
       "flow_directed_remain": {
         "name": "定向流量剩余"
       },
+      "flow_directed_used": {
+        "name": "定向流量已用"
+      },
       "flow_total_remain": {
         "name": "总流量剩余"
+      },
+      "flow_total_used": {
+        "name": "总流量已用"
       },
       "voice_remain": {
         "name": "语音剩余"
       },
+      "voice_used": {
+        "name": "语音已用"
+      },
       "sms_remain": {
         "name": "短信剩余"
+      },
+      "sms_used": {
+        "name": "短信已用"
       },
       "plan_price": {
         "name": "套餐月费"

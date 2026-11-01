@@ -18,6 +18,7 @@ from homeassistant.components.sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import PERCENTAGE, UnitOfInformation
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -45,7 +46,14 @@ async def async_setup_entry(
 
     @callback
     def _sync() -> None:
+        # 数据驱动部分：运营商这次真正返回了哪些字段（决定首次安装建哪些实体）
         desired = _desired_keys(coordinator.data or {})
+        # 实体集合一旦建立就必须稳定：数据缺失（首次刷新失败 / 单端点漂移 /
+        # 降级为空）时若让集合跟着塌缩，实体就会从状态机消失（注册表还在，
+        # 用户视角是"17 个实体突然没了"）。因此始终并入注册表里已存在的 key，
+        # 由实体自身显示 unavailable。首次安装时注册表为空 → 仍是纯数据驱动，
+        # 不会凭空造出运营商不提供的字段。
+        desired = list(dict.fromkeys([*desired, *_registry_keys(hass, entry)]))
         new = [k for k in desired if k not in created]
         if not new:
             return
@@ -54,6 +62,47 @@ async def async_setup_entry(
 
     _sync()
     coordinator.async_add_listener(_sync)
+
+
+def _registry_keys(hass: HomeAssistant, entry: ConfigEntry) -> list[str]:
+    """从实体注册表反推该条目已存在的 sensor key（实体集合稳定化）。
+
+    只认 ``unique_id`` 形如 ``{entry_id}_{sensor_key}`` 且后缀在 ENTITY_FACTORY
+    里的条目：历史脏数据（早期版本换过 unique_id 格式）不能让 setup 抛 KeyError。
+    注册表不可用时返回空列表，退回纯数据驱动（首次安装的原有行为）。
+    """
+    try:
+        registry = er.async_get(hass)
+        reg_entries = er.async_entries_for_config_entry(registry, entry.entry_id)
+    except Exception as err:  # noqa: BLE001 - 注册表读取失败不该阻断平台加载
+        _LOGGER.debug("读取实体注册表失败，退回数据驱动建实体: %s", err)
+        return []
+
+    prefix = f"{entry.entry_id}_"
+    keys: list[str] = []
+    for reg_entry in reg_entries:
+        # 只处理本平台的 sensor 实体（button 等其它平台不在这里重建）
+        entity_domain = getattr(reg_entry, "domain", None)
+        if entity_domain is None:
+            # 极老版本无 domain 字段：从 entity_id 推导。不能用
+            # RegistryEntry.platform —— 它是**集成域名**（cn_carrier_monitor），
+            # 拿它比 "sensor" 会把所有条目 skip 掉，E1 保护静默失效。
+            # 也不用 import split_entity_id：它在不同 HA 版本里分别位于
+            # helpers.entity / core，防御性分支不该再引入可能 ImportError 的依赖。
+            entity_id = getattr(reg_entry, "entity_id", "") or ""
+            entity_domain = entity_id.split(".", 1)[0]
+        if entity_domain != "sensor":
+            continue
+        unique_id = getattr(reg_entry, "unique_id", "") or ""
+        if not unique_id.startswith(prefix):
+            continue
+        key = unique_id[len(prefix):]
+        if key not in ENTITY_FACTORY:
+            _LOGGER.debug("跳过未知实体键（注册表脏数据）: %s", unique_id)
+            continue
+        keys.append(key)
+    # 去重 + 排序：注册表顺序不保证稳定，排序后实体创建顺序可复现
+    return sorted(dict.fromkeys(keys))
 
 
 def _desired_keys(data: dict[str, Any]) -> list[str]:

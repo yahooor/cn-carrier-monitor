@@ -16,7 +16,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import CarrierAuthError, CarrierError, create_client
-from .const import DEFAULT_INTERVAL, DOMAIN
+from .const import CARRIER_LABELS, DEFAULT_INTERVAL, DOMAIN
 from .event_log import (
     EVENT_CIRCUIT_OPEN,
     EVENT_FAILURE,
@@ -68,6 +68,8 @@ class CarrierDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._auth_fail_streak = 0
         self._last_persist_at = 0.0
         self._relogin_lock = asyncio.Lock()
+        # 掉线一次性通知是否已发（恢复成功后清零，下一轮掉线可再提示）
+        self._needs_human_notified = False
         # 诊断用：最近一次失败的分类与摘要（不含凭证）
         self.last_error: dict[str, Any] | None = None
         # 选项快照：用于区分「用户改设置」与「凭证滑动续期」两种 entry 更新
@@ -90,12 +92,22 @@ class CarrierDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             and time.time() - self._last_fail_at < self.CIRCUIT_COOLDOWN
         ):
             degraded = dict(self.data) if isinstance(self.data, dict) else {}
-            degraded["extra"] = {
+            extra = {
                 **(degraded.get("extra") or {}),
                 "circuit_open": True,
                 "fail_streak": self._fail_streak,
             }
+            # 熔断期间保留"掉线"语义：实体属性要能区分"会话失效"和"只是没数据"
+            if self._auth_fail_streak > 0:
+                extra.setdefault("login_expired", True)
+                message = (self.last_error or {}).get("message")
+                if message:
+                    extra.setdefault("login_error", str(message)[:120])
+            degraded["extra"] = extra
             await self._emit_event(EVENT_CIRCUIT_OPEN, fail_streak=self._fail_streak)
+            # 熔断打开且是认证问题 → 一次性提示人工处理（重复调用由标记位吞掉）
+            if self._auth_fail_streak > 0:
+                self._notify_needs_human("会话/凭证失效，自动重试已熔断")
             return degraded
 
         started = time.perf_counter()
@@ -104,18 +116,40 @@ class CarrierDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except CarrierAuthError as err:
             self.last_error = self._error_info(err)
             self._auth_fail_streak += 1
-            await self._emit_event(EVENT_FAILURE, err=err, started=started)
-            _LOGGER.info("%s 认证失败(%s)", self.entry.title, err)
+            # 认证失败同样计入熔断计数：否则 cookie 类账号会按轮询间隔无限
+            # 无效重试（线上 22 小时 48 次 auth_expired），熔断器形同虚设。
+            self._fail_streak += 1
+            self._last_fail_at = time.time()
+            circuit_open = self._fail_streak >= self.FAILURE_THRESHOLD
+            await self._emit_event(
+                EVENT_FAILURE,
+                err=err,
+                started=started,
+                fail_streak=self._fail_streak,
+                circuit_open=circuit_open,
+            )
+            _LOGGER.info(
+                "%s 认证失败(%s)，连续失败 %s 次", self.entry.title, err, self._fail_streak
+            )
             if self.supports_sms_relogin:
-                self.hass.async_create_task(self._async_safe_send_relogin_sms())
+                if circuit_open:
+                    # 熔断期内不再空转发码任务（每次 auth 失败都调度只会烧短信费）
+                    _LOGGER.debug("%s 已熔断，跳过自动发码", self.entry.title)
+                else:
+                    self.hass.async_create_task(self._async_safe_send_relogin_sms())
             # 降级保实体（Pocket-Carrier 同策略）：有历史数据时返回旧值并标记
             # 登录失效，实体保持可用而不是整条卸载；首次（无数据）才走官方重认证
-            if isinstance(self.data, dict) and self.data:
+            has_data = isinstance(self.data, dict) and bool(self.data)
+            if not has_data or circuit_open:
+                self._notify_needs_human(f"认证失败：{err}")
+            if has_data:
                 degraded = dict(self.data)
                 degraded["extra"] = {
                     **(degraded.get("extra") or {}),
                     "login_expired": True,
                     "login_error": str(err)[:120],
+                    "fail_streak": self._fail_streak,
+                    **({"circuit_open": True} if circuit_open else {}),
                 }
                 return degraded
             raise ConfigEntryAuthFailed(str(err)) from err
@@ -138,6 +172,8 @@ class CarrierDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._fail_streak = 0
         self._auth_fail_streak = 0
         self.last_error = None
+        # 恢复成功 → 撤掉"需要人工"通知，避免陈旧告警长期挂在界面上
+        self._dismiss_needs_human()
         await self._emit_event(EVENT_SUCCESS, data=data, started=started)
         # 会话滑动续期：把客户端刷新后的凭证（联通 token_online、移动 Cookie 等）
         # 写回配置条目；服务端会话顺延后重启 HA 不丢登录态
@@ -155,6 +191,70 @@ class CarrierDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "message": str(err)[:200],
             "at": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
+
+    # ------------------------------------------------------------------ 掉线通知
+
+    @property
+    def needs_human_notification_id(self) -> str:
+        """同一 entry 固定通知 ID：重复发送是原地更新，不会堆一串通知。"""
+        return f"{DOMAIN}_reauth_{self.entry.entry_id}"
+
+    def _needs_human_hint(self) -> str:
+        """按认证模式给出用户可执行的处理动作（cookie 模式与短信模式差别很大）。"""
+        mode = str(self.entry.data.get("auth_mode") or "cookie")
+        if mode == "sms":
+            return (
+                "短信验证码模式：若已自动下发验证码，请把收到的验证码 POST 到 "
+                "`/api/webhook/cn_carrier_monitor_sms`（JSON: "
+                '{"phone": "号码", "code": "验证码"}），或在集成的「重新认证」里手动输入。'
+            )
+        if mode == "password":
+            return "服务密码模式：请确认密码未被修改，并在集成的「重新认证」里重新提交。"
+        return (
+            "会话/Cookie 模式：会话已失效且无法自动续期。请在浏览器重新登录后，"
+            "用 `cn_carrier_monitor.inject_token` 服务注入新的 cookies，"
+            "或在集成的「重新认证」里重新导入会话。"
+        )
+
+    def _notify_needs_human(self, reason: str) -> None:
+        """账号掉线且无法自愈时发一条 persistent_notification（每个 entry 一次）。"""
+        if self._needs_human_notified:
+            return
+        try:
+            from homeassistant.components.persistent_notification import (
+                async_create as pn_create,
+            )
+
+            carrier = CARRIER_LABELS.get(self.carrier, self.carrier)
+            pn_create(
+                self.hass,
+                title="中国运营商话费监控：账号需要人工处理",
+                message=(
+                    f"{carrier} 账号 {self.entry.title} 已掉线，自动重试无法恢复。\n\n"
+                    f"原因：{reason}\n\n"
+                    f"{self._needs_human_hint()}\n\n"
+                    "实体已保留（显示为 unavailable），重新登录成功后本通知会自动消失。"
+                ),
+                notification_id=self.needs_human_notification_id,
+            )
+            self._needs_human_notified = True
+        except Exception as err:  # noqa: BLE001 - 通知失败绝不能影响更新流程
+            _LOGGER.debug("掉线通知发送失败（忽略）: %s", err)
+
+    def _dismiss_needs_human(self) -> None:
+        """恢复成功后撤掉掉线通知，并允许下一次掉线重新提示。"""
+        if not self._needs_human_notified:
+            return
+        try:
+            from homeassistant.components.persistent_notification import (
+                async_dismiss as pn_dismiss,
+            )
+
+            pn_dismiss(self.hass, self.needs_human_notification_id)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("掉线通知清理失败（忽略）: %s", err)
+            return
+        self._needs_human_notified = False
 
     # ------------------------------------------------------------------ 事件埋点
 
