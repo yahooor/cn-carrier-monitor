@@ -1,15 +1,11 @@
 {
   "domain": "cn_carrier_monitor",
   "name": "中国运营商话费监控",
-  "after_dependencies": [
-    "frontend"
-  ],
   "codeowners": [
     "@yahooor"
   ],
   "config_flow": true,
   "dependencies": [
-    "http",
     "persistent_notification"
   ],
   "documentation": "https://github.com/yahooor/cn-carrier-monitor",
@@ -23,5 +19,5 @@
     "curl_cffi>=0.9,<1.0"
   ],
   "single_config_entry": false,
-  "version": "1.7.0"
+  "version": "1.7.1"
 }

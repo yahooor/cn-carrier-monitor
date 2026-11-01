@@ -1,12 +1,14 @@
 """中国运营商话费监控 — 电信/联通/移动/广电统一集成.
 
 支持多账号（每个配置条目一个号码）、短信/服务密码登录、会话过期自动发起重新认证。
+
+品牌图（icon/logo）由集成目录内 brand/ 提供（HA 2026.3+ 本地品牌机制），
+无需任何运行时代码；brands CDN 的 custom_integrations 路径为旧版 HA 的兜底。
 """
 
 from __future__ import annotations
 
 import logging
-import os
 
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
@@ -106,13 +108,6 @@ async def async_setup(hass: HomeAssistant, config) -> bool:
     from . import webhook as _webhook
 
     _webhook.async_register(hass)
-
-    # 集成图标（brands PR 合并前的前端覆盖方案）
-    # 用 try/except 保护——图标注册失败不应阻止集成加载
-    try:
-        await _async_register_frontend_assets(hass)
-    except Exception as err:  # noqa: BLE001 - 纯展示层，失败不影响功能
-        _LOGGER.warning("前端图标资源注册失败（不影响功能）: %s", err)
 
     return True
 
@@ -246,40 +241,3 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if isinstance(coordinator, CarrierDataUpdateCoordinator):
         await coordinator.async_shutdown()
     return unload_ok
-
-
-async def _async_register_frontend_assets(hass: HomeAssistant) -> None:
-    """注册集成前端资源（图标覆盖 JS + 静态图片）。"""
-    integration_path = os.path.dirname(__file__)
-    js_path = os.path.join(integration_path, "js", "icon_override.js")
-    img_dir = os.path.join(integration_path, "images")
-
-    paths: list[tuple[str, str, bool]] = []
-    js_url = f"/api/custom_components/{DOMAIN}/js/icon_override.js"
-    if os.path.exists(js_path):
-        paths.append((js_url, js_path, False))
-    if os.path.isdir(img_dir):
-        paths.append((f"/api/custom_components/{DOMAIN}/images", img_dir, True))
-    if not paths:
-        return
-
-    try:
-        # HA 2024.7+ 的新 API；旧版本回退到 register_static_path
-        from homeassistant.components.http import StaticPathConfig
-
-        await hass.http.async_register_static_paths(
-            [StaticPathConfig(url, path, cache) for url, path, cache in paths]
-        )
-    except ImportError:
-        for url, path, cache in paths:
-            hass.http.register_static_path(url, path, cache_headers=cache)
-
-    # 注入前端模块（图标覆盖）。add_extra_js_url 需要 frontend 已加载，
-    # 未启用前端时静默跳过。
-    if any(url == js_url for url, _path, _cache in paths):
-        try:
-            from homeassistant.components.frontend import add_extra_js_url
-
-            add_extra_js_url(hass, js_url)
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.debug("前端模块注入跳过: %s", err)
