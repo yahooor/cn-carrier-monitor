@@ -334,7 +334,10 @@ async def test_registry_fallback_uses_entity_id_not_platform(ha):
     added = []
     await ha.sensor.async_setup_entry(hass, entry, added.extend)
 
-    assert [e.unique_id for e in added] == [f"{entry.entry_id}_balance"]
+    # session_state 始终创建（v1.7 起）；legacy 条目推导出 balance
+    assert sorted(e.unique_id for e in added) == sorted(
+        [f"{entry.entry_id}_balance", f"{entry.entry_id}_session_state"]
+    )
 
 
 # ---------------------------------------------------------------- Q3 版本声明

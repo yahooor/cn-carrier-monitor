@@ -27,7 +27,12 @@ _LOGGER = logging.getLogger(__name__)
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
-REFRESH_SCHEMA = vol.Schema({vol.Optional("entry_id"): cv.string})
+REFRESH_SCHEMA = vol.Schema(
+    {
+        vol.Optional("entry_id"): cv.string,
+        vol.Optional("phone"): cv.string,
+    }
+)
 
 INJECT_SCHEMA = vol.Schema(
     {
@@ -48,12 +53,23 @@ async def async_setup(hass: HomeAssistant, config) -> bool:
 
     async def async_refresh(call: ServiceCall) -> None:
         entry_id = call.data.get("entry_id")
+        phone = call.data.get("phone")
         coordinators = _coordinators(hass)
         if entry_id:
             coordinator = coordinators.get(entry_id)
             if coordinator is None:
                 raise HomeAssistantError(f"未找到 entry_id={entry_id} 的账号")
             await coordinator.async_request_refresh()
+            return
+        if phone:
+            matched = [
+                c for c in coordinators.values()
+                if c.entry.data.get("phone") == phone
+            ]
+            if not matched:
+                raise HomeAssistantError(f"未找到号码 {phone} 的账号")
+            for coordinator in matched:
+                await coordinator.async_request_refresh()
             return
         for coordinator in coordinators.values():
             await coordinator.async_request_refresh()

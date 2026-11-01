@@ -132,6 +132,8 @@ def _desired_keys(data: dict[str, Any]) -> list[str]:
     sms = data.get("sms") or {}
     if sms.get("remain") is not None:
         keys.append("sms_remain")
+    if sms.get("used") is not None:
+        keys.append("sms_used")
     if data.get("points") is not None:
         keys.append("points")
     # Round-3 新增
@@ -153,6 +155,8 @@ def _desired_keys(data: dict[str, Any]) -> list[str]:
         keys.append("phone_region")
     if data.get("account_status"):
         keys.append("account_status")
+    # 会话健康度与运营商返回什么字段无关：始终存在，便于自动化里做掉线告警
+    keys.append("session_state")
     # 同一键只出现一次：重复项会生成两个同 unique_id 的实体
     return list(dict.fromkeys(keys))
 
@@ -498,3 +502,37 @@ class CarrierAccountStatusSensor(CarrierSensor):
     @property
     def native_value(self):
         return self._data.get("account_status")
+
+
+@_register("session_state")
+class CarrierSessionStateSensor(CarrierSensor):
+    """会话健康度：healthy / degraded / needs_human / circuit_open。
+
+    与其它实体不同，它**始终存在**（不受运营商返回字段影响），因此掉线时
+    自动化可以直接用它告警，而不用去猜哪个数值实体变成了 unavailable。
+    """
+
+    _sensor_key = "session_state"
+    _attr_translation_key = "session_state"
+    _attr_icon = "mdi:shield-account"
+
+    @property
+    def native_value(self):
+        return getattr(self.coordinator, "session_state", None)
+
+    @property
+    def available(self) -> bool:
+        # 会话状态本身永远可读（这正是掉线时最需要的信息）
+        return True
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        attrs = super().extra_state_attributes
+        coordinator = self.coordinator
+        attrs["fail_streak"] = getattr(coordinator, "fail_streak", None)
+        attrs["auth_fail_streak"] = getattr(coordinator, "auth_fail_streak", None)
+        attrs["last_error"] = getattr(coordinator, "last_error", None)
+        anomalies = (self._data.get("extra") or {}).get("endpoint_anomalies")
+        if anomalies:
+            attrs["endpoint_anomalies"] = anomalies
+        return attrs

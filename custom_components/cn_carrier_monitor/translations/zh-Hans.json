@@ -264,6 +264,9 @@
       },
       "account_status": {
         "name": "账户状态"
+      },
+      "session_state": {
+        "name": "会话状态"
       }
     },
     "button": {

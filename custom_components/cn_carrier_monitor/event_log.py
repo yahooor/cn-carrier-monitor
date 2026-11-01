@@ -26,6 +26,8 @@ _LOGGER = logging.getLogger(__name__)
 
 FILE_NAME = "cn_carrier_monitor_events.jsonl"
 MAX_BYTES = 1_000_000
+# 诊断包里带走的最近事件条数（只含 ts/event/category，不含手机号）
+MAX_RECENT_EVENTS = 5
 
 CATEGORY_AUTH = "auth_expired"
 CATEGORY_DRIFT = "protocol_drift"

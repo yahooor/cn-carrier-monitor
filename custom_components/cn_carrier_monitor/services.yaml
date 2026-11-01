@@ -4,8 +4,15 @@ refresh:
   fields:
     entry_id:
       name: 配置条目 ID
-      description: 留空刷新全部账号。
+      description: 留空刷新全部账号；与 phone 同时提供时以 entry_id 为准。
       example: ""
+      required: false
+      selector:
+        text:
+    phone:
+      name: 手机号
+      description: 按手机号刷新对应账号（entry_id 留空时生效）。
+      example: "19974410126"
       required: false
       selector:
         text:

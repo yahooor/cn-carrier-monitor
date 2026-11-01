@@ -57,6 +57,25 @@ class _StubCoordinator:
         self.data = data
         self.last_update_success = success
         self._listeners = []
+        # session_state 实体会读这些（真实 coordinator 上是 property）
+        self._fail_streak = 0
+        self._auth_fail_streak = 0
+
+    @property
+    def fail_streak(self) -> int:
+        return self._fail_streak
+
+    @property
+    def auth_fail_streak(self) -> int:
+        return self._auth_fail_streak
+
+    @property
+    def session_state(self) -> str:
+        if self._fail_streak >= 5:
+            return "circuit_open"
+        if self._auth_fail_streak > 0:
+            return "degraded" if self.data else "needs_human"
+        return "healthy"
 
     def async_add_listener(self, update_callback, update_before_add=False):
         self._listeners.append(update_callback)
@@ -115,10 +134,14 @@ async def test_sensor_entities_rebuilt_from_registry_when_data_empty(ha):
     added = []
     await ha.sensor.async_setup_entry(hass, entry, added.extend)
 
-    assert sorted(_sensor_keys(added, entry)) == ["balance", "plan_name"]
-    # 数据缺失 → native_value 为 None（显示 unavailable），但实体本身存在
-    assert all(entity.native_value is None for entity in added)
-    assert all(entity.available is False for entity in added)
+    assert sorted(_sensor_keys(added, entry)) == ["balance", "plan_name", "session_state"]
+    # 数据缺失 → 数据实体 native_value 为 None（显示 unavailable），但实体本身存在
+    by_key = {e.unique_id[len(entry.entry_id) + 1:]: e for e in added}
+    assert all(by_key[k].native_value is None for k in ("balance", "plan_name"))
+    assert all(by_key[k].available is False for k in ("balance", "plan_name"))
+    # session_state 是会话健康度，掉线时恰恰要可读：healthy + available
+    assert by_key["session_state"].native_value == "healthy"
+    assert by_key["session_state"].available is True
 
 
 async def test_sensor_registry_rebuild_ignores_dirty_and_foreign_entries(ha):
@@ -149,7 +172,7 @@ async def test_sensor_registry_rebuild_ignores_dirty_and_foreign_entries(ha):
     added = []
     await ha.sensor.async_setup_entry(hass, entry, added.extend)
 
-    assert _sensor_keys(added, entry) == ["balance"]
+    assert sorted(_sensor_keys(added, entry)) == ["balance", "session_state"]
 
 
 async def test_sensor_first_install_stays_data_driven(ha):
@@ -164,7 +187,7 @@ async def test_sensor_first_install_stays_data_driven(ha):
     added = []
     await ha.sensor.async_setup_entry(hass, entry, added.extend)
 
-    assert sorted(_sensor_keys(added, entry)) == ["balance", "flow_general_used"]
+    assert sorted(_sensor_keys(added, entry)) == ["balance", "flow_general_used", "session_state"]
 
 
 async def test_sensor_keeps_registry_keys_when_data_is_partial(ha):
@@ -183,9 +206,9 @@ async def test_sensor_keeps_registry_keys_when_data_is_partial(ha):
     await ha.sensor.async_setup_entry(hass, entry, added.extend)
 
     assert sorted(_sensor_keys(added, entry)) == [
-        "balance", "flow_total_used", "plan_name",
+        "balance", "flow_total_used", "plan_name", "session_state",
     ]
-    assert len(added) == 3
+    assert len(added) == 4
 
 
 async def test_sensor_listener_adds_new_keys_after_recovery(ha):
@@ -201,14 +224,16 @@ async def test_sensor_listener_adds_new_keys_after_recovery(ha):
 
     added = []
     await ha.sensor.async_setup_entry(hass, entry, added.extend)
-    assert _sensor_keys(added, entry) == ["balance"]
+    assert sorted(_sensor_keys(added, entry)) == ["balance", "session_state"]
 
     coordinator.data = {"balance": 12.5, "month_cost": 8.0}
     coordinator.last_update_success = True
     coordinator.notify()
 
-    assert sorted(_sensor_keys(added, entry)) == ["balance", "month_cost"]
-    assert len(added) == 2  # balance 没有被重复创建
+    assert sorted(_sensor_keys(added, entry)) == [
+        "balance", "month_cost", "session_state",
+    ]
+    assert len(added) == 3  # balance / session_state 没有被重复创建
 
 
 # ---------------------------------------------------------------- E2 不整条卸载
@@ -356,8 +381,10 @@ async def test_degraded_setup_keeps_entities_in_state_machine(ha, monkeypatch):
 
     added = []
     await ha.sensor.async_setup_entry(hass, entry, added.extend)
-    assert sorted(_sensor_keys(added, entry)) == ["balance", "plan_name"]
-    assert all(entity.available is False for entity in added)
+    assert sorted(_sensor_keys(added, entry)) == ["balance", "plan_name", "session_state"]
+    # session_state 实体永远可读（这正是掉线时最需要的信息）
+    unavailable = [e for e in added if e.unique_id.endswith(("_balance", "_plan_name"))]
+    assert all(entity.available is False for entity in unavailable)
 
     await coordinator.async_shutdown()
 

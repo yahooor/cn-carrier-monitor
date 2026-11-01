@@ -616,7 +616,13 @@ class MobileClient(CarrierClient):
                 # 网关用状态码表达"会话失效"：401/403，或 302 跳登录页
                 # （cookie 过期最常见的签名）。与 _native_request 的处理保持一致。
                 raise CarrierAuthError("mobile_session_expired")
-            # 其余非 200（5xx 网关错误 / 408 / 429 / 404）必须抛异常而不是
+            if status in (404, 410):
+                # 路径不存在 = 端点下线/迁移（协议漂移），不是网络故障。
+                # 归 network 会让 protocol_drift 的占比不可解释。
+                raise ParseAnomalyError(
+                    f"移动网厅 {url} HTTP {status}（端点已下线或迁移）"
+                )
+            # 其余非 200（5xx 网关错误 / 408 / 429）必须抛异常而不是
             # return None：否则所有端点都非 200 时 failures/anomalies 都是空的，
             # async_fetch 会误判成"会话失效"，把用户引向填密码这个无效动作。
             raise CarrierError(f"网络错误: 移动网厅 {url} HTTP {status}")

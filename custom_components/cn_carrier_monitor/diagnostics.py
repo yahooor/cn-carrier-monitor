@@ -6,6 +6,10 @@ openid / 手机号等敏感字段，只保留结构与配置形态，便于 issu
 
 from __future__ import annotations
 
+import collections
+import json
+import logging
+from pathlib import Path
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -22,6 +26,9 @@ from .const import (
     CONF_TOKEN,
     DOMAIN,
 )
+from .event_log import FILE_NAME, MAX_RECENT_EVENTS
+
+_LOGGER = logging.getLogger(__name__)
 
 SENSITIVE_KEYS = {
     CONF_PASSWORD,
@@ -49,6 +56,49 @@ def _redact(value: Any, keep_structure: bool = True) -> Any:
 
 def _mask_phone(phone: str) -> str:
     return f"{phone[:3]}****{phone[7:]}" if len(phone) == 11 else phone
+
+
+def _summarize_events(path: str) -> dict[str, Any]:
+    """读事件日志尾部，输出失败分类计数与最近几条摘要。
+
+    只统计 event/category 计数，不输出 phone 等原始字段（诊断包会随
+    issue 外发，手机号与时序画像按威胁模型 R2 不落盘）。
+    """
+    file = Path(path)
+    if not file.exists():
+        return {}
+    try:
+        lines = file.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return {}
+    tail = lines[-200:]
+    counts: dict[str, dict[str, int]] = collections.defaultdict(
+        lambda: collections.defaultdict(int)
+    )
+    recent: list[dict[str, str]] = []
+    for line in tail:
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        event = str(record.get("event") or "unknown")
+        category = str(record.get("category") or "")
+        counts[event][category or "-"] += 1
+        if len(recent) < MAX_RECENT_EVENTS:
+            recent.append(
+                {
+                    "ts": str(record.get("ts") or ""),
+                    "event": event,
+                    "category": category,
+                }
+            )
+    return {
+        "counts": {k: dict(v) for k, v in counts.items()},
+        "recent": recent,
+    }
 
 
 async def async_get_config_entry_diagnostics(
@@ -87,9 +137,18 @@ async def async_get_config_entry_diagnostics(
                 if coordinator.update_interval
                 else None
             ),
-            # 最近一次失败的分类/摘要（不含凭证），排障时比翻日志快
-            "last_error": getattr(coordinator, "last_error", None),
+            # 会话健康度 + 失败计数：排障时一眼区分"掉线/熔断/正常"
+            "session_state": getattr(coordinator, "session_state", None),
             "fail_streak": getattr(coordinator, "_fail_streak", 0),
             "auth_fail_streak": getattr(coordinator, "_auth_fail_streak", 0),
+            # 最近一次失败的分类/摘要（不含凭证），排障时比翻日志快
+            "last_error": getattr(coordinator, "last_error", None),
         }
+        # 事件日志摘要放 executor 读（diagnostics 是 async 上下文）
+        try:
+            diagnostics["recent_events"] = await hass.async_add_executor_job(
+                _summarize_events, hass.config.path(FILE_NAME)
+            )
+        except Exception as err:  # noqa: BLE001 - 诊断信息缺失不应让下载失败
+            _LOGGER.warning("读取事件日志摘要失败（忽略）: %s", err)
     return diagnostics

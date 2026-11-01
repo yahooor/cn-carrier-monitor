@@ -264,6 +264,9 @@
       },
       "account_status": {
         "name": "Account status"
+      },
+      "session_state": {
+        "name": "Session state"
       }
     },
     "button": {

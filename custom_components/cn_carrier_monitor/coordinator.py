@@ -55,11 +55,13 @@ class CarrierDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # 多账号错峰：全部条目在同一分钟建连容易触发运营商风控
         jitter = random.randint(0, 59)
+        # 基准间隔：认证失败后按倍数自适应拉长，恢复后回到这个值
+        self._base_interval = timedelta(minutes=minutes, seconds=jitter)
         super().__init__(
             hass,
             _LOGGER,
             name=f"{DOMAIN}_{self.carrier}_{entry.data.get('phone', '')}",
-            update_interval=timedelta(minutes=minutes, seconds=jitter),
+            update_interval=self._base_interval,
         )
 
         self._fail_streak = 0
@@ -142,6 +144,8 @@ class CarrierDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             has_data = isinstance(self.data, dict) and bool(self.data)
             if not has_data or circuit_open:
                 self._notify_needs_human(f"认证失败：{err}")
+            # 认证失败后拉长轮询间隔（无人处理时不要每 30 分钟空转一次）
+            self._apply_adaptive_interval()
             if has_data:
                 degraded = dict(self.data)
                 degraded["extra"] = {
@@ -172,6 +176,8 @@ class CarrierDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._fail_streak = 0
         self._auth_fail_streak = 0
         self.last_error = None
+        # 恢复成功 → 回到基准轮询间隔
+        self.update_interval = self._base_interval
         # 恢复成功 → 撤掉"需要人工"通知，避免陈旧告警长期挂在界面上
         self._dismiss_needs_human()
         await self._emit_event(EVENT_SUCCESS, data=data, started=started)
@@ -191,6 +197,44 @@ class CarrierDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "message": str(err)[:200],
             "at": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
+
+    # ------------------------------------------------------------------ 会话状态
+
+    @property
+    def fail_streak(self) -> int:
+        """连续失败次数（含网络/认证）。"""
+        return self._fail_streak
+
+    @property
+    def auth_fail_streak(self) -> int:
+        """连续认证失败次数。"""
+        return self._auth_fail_streak
+
+    @property
+    def session_state(self) -> str:
+        """会话健康度（供 session_state 实体与诊断包使用）。
+
+        判定顺序即严重度：熔断 > 需人工 > 降级 > 正常。
+        """
+        if self._fail_streak >= self.FAILURE_THRESHOLD:
+            return "circuit_open"
+        if self._auth_fail_streak > 0:
+            return "degraded" if self.data else "needs_human"
+        return "healthy"
+
+    def _apply_adaptive_interval(self) -> None:
+        """认证失败后按 1/2/4/8 倍拉长轮询间隔（封顶 24h）。
+
+        Cookie 类账号失效后无人处理时，30 分钟一次的空转既刷日志又白白
+        消耗运营商风控额度；熔断只管"要不要发请求"，间隔决定"多久醒一次"。
+        """
+        factor = min(2 ** max(self._auth_fail_streak - 1, 0), 8)
+        target = self._base_interval * factor
+        self.update_interval = min(target, timedelta(hours=24))
+        _LOGGER.debug(
+            "%s 认证失败 %d 次，轮询间隔调整为 %s",
+            self.entry.title, self._auth_fail_streak, self.update_interval,
+        )
 
     # ------------------------------------------------------------------ 掉线通知
 
