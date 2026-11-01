@@ -1,6 +1,9 @@
 {
   "domain": "cn_carrier_monitor",
   "name": "中国运营商话费监控",
+  "after_dependencies": [
+    "frontend"
+  ],
   "codeowners": [
     "@yahooor"
   ],
@@ -8,9 +11,6 @@
   "dependencies": [
     "http",
     "persistent_notification"
-  ],
-  "after_dependencies": [
-    "frontend"
   ],
   "documentation": "https://github.com/yahooor/cn-carrier-monitor",
   "integration_type": "hub",
