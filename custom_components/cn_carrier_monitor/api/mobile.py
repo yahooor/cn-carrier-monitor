@@ -183,6 +183,26 @@ def _login_headers() -> dict[str, str]:
     }
 
 
+# 解析期崩溃的异常族：运营商字段类型随省份/套餐漂移，深层 .get 链最常炸这几类
+_PARSE_CRASHES = (AttributeError, TypeError, KeyError, IndexError, ValueError)
+
+
+def _as_parse_anomaly(url: str, err: BaseException) -> ParseAnomalyError:
+    """把解析期崩溃转成带端点名的 ParseAnomalyError（protocol_drift）。
+
+    线上 11 次 ``internal / AttributeError: 'NoneType' object has no attribute
+    'get'`` 完全无法定位是哪个接口 —— 异常消息里必须带 URL，才能区分是套餐、
+    余额还是积分接口结构漂移。用 ``raise ... from None`` 建异常，避免把原始
+    崩溃链（对用户毫无意义的 .get 栈）带进日志。
+    """
+    try:
+        raise ParseAnomalyError(
+            f"mobile 端点 {url} 响应结构异常: {type(err).__name__}: {err}"
+        ) from None
+    except ParseAnomalyError as anomaly:
+        return anomaly
+
+
 async def _simple_get(session, url: str, headers: dict) -> tuple[int, str]:
     try:
         async with session.get(
@@ -592,8 +612,14 @@ class MobileClient(CarrierClient):
                 method, target, json_body=json_body, headers=headers
             )
         if status != 200:
-            _LOGGER.debug("移动网厅查询 %s HTTP %s", url, status)
-            return None
+            if status in (401, 403) or 300 <= status < 400:
+                # 网关用状态码表达"会话失效"：401/403，或 302 跳登录页
+                # （cookie 过期最常见的签名）。与 _native_request 的处理保持一致。
+                raise CarrierAuthError("mobile_session_expired")
+            # 其余非 200（5xx 网关错误 / 408 / 429 / 404）必须抛异常而不是
+            # return None：否则所有端点都非 200 时 failures/anomalies 都是空的，
+            # async_fetch 会误判成"会话失效"，把用户引向填密码这个无效动作。
+            raise CarrierError(f"网络错误: 移动网厅 {url} HTTP {status}")
         text = decrypt_payload(body, WX_AES_KEY, WX_AES_IV)
         try:
             payload = json.loads(text)
@@ -681,6 +707,20 @@ class MobileClient(CarrierClient):
             and data["flow_total"] is None
             and data["voice"] is None
         ):
+            # 空数据不等于"会话失效"：必须按本轮收集到的证据判类，否则断网会被
+            # 报成"请重新登录"（auth_expired），把用户引向填密码这个无效动作，
+            # 还会把 _auth_fail_streak 推高、提前触发重登发码。
+            extra = data.get("extra") or {}
+            failures = extra.get("endpoint_failures") or []
+            anomalies = extra.get("endpoint_anomalies") or []
+            if failures:
+                # 传输层全失败 → 网络问题
+                raise CarrierError(f"移动网厅端点全部请求失败: {failures[0][:140]}")
+            if anomalies:
+                # 有响应但结构全漂移 → 协议漂移
+                raise ParseAnomalyError(
+                    f"移动网厅端点响应结构全部漂移: {anomalies[0][:140]}"
+                )
             raise CarrierAuthError("mobile_session_expired")
         return finish(data)
 
@@ -708,26 +748,70 @@ class MobileClient(CarrierClient):
         # 一次更新多打 2 个首页请求，徒增风控暴露面）。
         uni_headers = await self._prepare_uni_headers()
 
+        # 本轮收集到的端点级证据（最终落到 data["extra"]，便于诊断定位与判类）：
+        # anomalies = 有响应但结构漂移（protocol_drift）；failures = 传输/业务失败
+        anomalies: list[str] = []
+        failures: list[str] = []
+
+        def _record_anomaly(url: str, err: BaseException) -> None:
+            """收敛单端点结构漂移：统一成带端点名的 ParseAnomalyError（protocol_drift）。"""
+            if isinstance(err, ParseAnomalyError):
+                # 解析器已自行归类（@parse_safe），只补端点名
+                anomaly = ParseAnomalyError(f"mobile 端点 {url} {err}")
+            else:
+                anomaly = _as_parse_anomaly(url, err)
+            _LOGGER.debug(
+                "移动网厅 %s 解析异常（protocol_drift，忽略）: %s: %s",
+                url, type(err).__name__, err,
+            )
+            anomalies.append(str(anomaly))
+
         async def _query(url: str, **kwargs) -> dict[str, Any] | None:
-            """单端点容错：任一接口漂移都不该让整次更新失败。"""
+            """单端点容错：任一接口漂移都不该让整次更新失败。
+
+            除 CarrierError 外还要吃掉解析期崩溃（NoneType.get / 类型漂移）：
+            这类异常原先裸奔成 internal/AttributeError，整次更新失败且日志里
+            没有端点信息。转成带 URL 的 ParseAnomalyError 后是可定位的
+            protocol_drift，并且只影响本端点。
+            """
             try:
                 return await self._wx_query(url, **kwargs)
             except CarrierAuthError:
                 raise
+            except ParseAnomalyError as err:
+                # 必须排在 CarrierError 之前：ParseAnomalyError ⊂ CarrierError，
+                # 否则 _wx_query 自己抛的解密失败/顶层结构未知永远进不了 anomalies，
+                # 恰好是诊断最需要的那类漂移。
+                _record_anomaly(url, err)
+                return None
             except CarrierError as err:
+                # 传输层/业务层失败：单独记入 failures，供 async_fetch 判类（network）
                 _LOGGER.debug("移动网厅 %s 失败（忽略）: %s", url, err)
+                failures.append(f"{url}: {err}")
+                return None
+            except _PARSE_CRASHES as err:
+                _record_anomaly(url, err)
                 return None
 
-        plan = await _query(MOBILE_PLAN_URL)
-        if plan:
-            rd = (plan.get("object") or {}).get("resultData") or {}
+        def _apply(url: str, parser, payload: dict[str, Any] | None) -> None:
+            """端点响应解析容错：结构漂移只丢这个端点的字段，不牵连其它端点。"""
+            if not payload:
+                return
+            try:
+                parser(payload)
+            except ParseAnomalyError as err:
+                _record_anomaly(url, err)
+            except _PARSE_CRASHES as err:
+                _record_anomaly(url, err)
+
+        def _apply_plan(payload: dict[str, Any]) -> None:
+            rd = (payload.get("object") or {}).get("resultData") or {}
             data["plan_name"] = rd.get("curPlanName") or None
             if rd.get("curPlanPrice"):
                 data["plan_price"] = rd.get("curPlanPrice")
 
-        fee = await _query(MOBILE_FEE_URL_V2)
-        if fee:
-            fee_rsp = (fee.get("data") or {}).get("realFeeQryRsp") or {}
+        def _apply_fee(payload: dict[str, Any]) -> None:
+            fee_rsp = (payload.get("data") or {}).get("realFeeQryRsp") or {}
             if data["balance"] is None:
                 data["balance"] = to_float(
                     fee_rsp.get("curFeeTotal") or fee_rsp.get("curFee"))
@@ -749,27 +833,16 @@ class MobileClient(CarrierClient):
                 elif fee_rsp.get(src_key):
                     extra[dst] = fee_rsp.get(src_key)
 
-        margin = await _query(
-            MOBILE_MARGIN_URL_V2, method="POST",
-            json_body={"operation": "getCustomerKeyMessage"},
-            extra_headers=uni_headers)
-        if margin:
-            self._parse_margin(margin, data)
+        def _apply_margin(payload: dict[str, Any]) -> None:
+            self._parse_margin(payload, data)
 
-        # 积分（明文 JSON；必须走 curl_cffi 通道——wx.10086.cn 拦截 aiohttp TLS）
-        score = await _query(MOBILE_SCORE_URL, top_keys={"qryInfoRsp"})
-        if score:
-            pv = to_float((score.get("qryInfoRsp") or {}).get("pointValue"))
+        def _apply_score(payload: dict[str, Any]) -> None:
+            pv = to_float((payload.get("qryInfoRsp") or {}).get("pointValue"))
             if pv is not None:
                 data["points"] = pv
 
-        # 归属地 / 套餐code（getMarginQueryInfo）
-        qry = await _query(
-            MOBILE_MARGIN_QRY_URL_V2, method="POST",
-            json_body={"operation": "getCustomerKeyMessage"},
-            extra_headers=uni_headers)
-        if qry:
-            rd_mq = (qry.get("data") or {}).get("resultData") or {}
+        def _apply_margin_query(payload: dict[str, Any]) -> None:
+            rd_mq = (payload.get("data") or {}).get("resultData") or {}
             assign = rd_mq.get("customerAssignment")
             if assign:
                 data["location"] = assign
@@ -782,6 +855,43 @@ class MobileClient(CarrierClient):
                 data["plan_name"] = tariff
             data["real_name"] = "已实名"  # 移动网页端所有号均为实名
             data["account_status"] = "正常在网"
+
+        _apply(MOBILE_PLAN_URL, _apply_plan, await _query(MOBILE_PLAN_URL))
+
+        _apply(MOBILE_FEE_URL_V2, _apply_fee, await _query(MOBILE_FEE_URL_V2))
+
+        _apply(
+            MOBILE_MARGIN_URL_V2,
+            _apply_margin,
+            await _query(
+                MOBILE_MARGIN_URL_V2, method="POST",
+                json_body={"operation": "getCustomerKeyMessage"},
+                extra_headers=uni_headers),
+        )
+
+        # 积分（明文 JSON；必须走 curl_cffi 通道——wx.10086.cn 拦截 aiohttp TLS）
+        _apply(
+            MOBILE_SCORE_URL,
+            _apply_score,
+            await _query(MOBILE_SCORE_URL, top_keys={"qryInfoRsp"}),
+        )
+
+        # 归属地 / 套餐code（getMarginQueryInfo）
+        _apply(
+            MOBILE_MARGIN_QRY_URL_V2,
+            _apply_margin_query,
+            await _query(
+                MOBILE_MARGIN_QRY_URL_V2, method="POST",
+                json_body={"operation": "getCustomerKeyMessage"},
+                extra_headers=uni_headers),
+        )
+
+        if anomalies:
+            # 落进 extra：事件日志的 extra_keys / diagnostics 能直接看到哪个端点漂移
+            data["extra"]["endpoint_anomalies"] = anomalies
+        if failures:
+            # 同上：传输层失败的端点清单（async_fetch 用它区分 network 与 auth）
+            data["extra"]["endpoint_failures"] = failures
 
     @parse_safe
     def _parse_margin(self, payload: dict[str, Any], data: dict[str, Any]) -> None:
