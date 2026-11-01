@@ -6,13 +6,24 @@ Content-Type: application/json
 {"phone": "19974410126", "code": "123456"}
 （只有一个短信模式账号时可省略 phone，只发 {"code": "123456"}）
 
+鉴权与限频（v1.5 起）：
+- 条目 options/data 里配置 ``webhook_secret`` 后，请求必须带同值
+  ``X-Secret`` 头或 body 的 ``secret`` 字段（常量时间比较）；
+- 未配置密钥时只接受**内网/回环地址**的请求，避免 HA 暴露到公网后
+  任何人都能拿 6 位验证码去撞号；
+- 同一号码 10 分钟内最多 5 次提交，防暴力枚举。
+
 即使条目当前处于 setup_error（coordinator 不在内存），也会直接用条目数据
 构造临时 client 完成重登并 reload 条目。
 """
 
 from __future__ import annotations
 
+import hmac
+import ipaddress
 import logging
+import time
+from typing import Any
 
 import aiohttp
 import voluptuous as vol
@@ -23,7 +34,15 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv
 
 from .api import TelecomClient, UnicomClient
-from .const import CARRIER_TELECOM, CARRIER_UNICOM, CONF_AUTH_MODE, DOMAIN
+from .const import (
+    CARRIER_TELECOM,
+    CARRIER_UNICOM,
+    CONF_AUTH_MODE,
+    CONF_WEBHOOK_SECRET,
+    DATA_SMS_STATE,
+    DOMAIN,
+)
+from .net import build_connector
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -33,8 +52,16 @@ _SCHEMA = vol.Schema(
     {
         vol.Required("code"): cv.string,
         vol.Optional("phone", default=""): cv.string,
+        # 早期 schema 没声明 secret，voluptuous 默认拒绝未知键，
+        # 于是「body 里带密钥」这条路根本走不通，只有请求头有效
+        vol.Optional("secret", default=""): cv.string,
     }
 )
+
+# 限频：同一账号 10 分钟内最多 5 次验证码提交
+_RATE_WINDOW = 600.0
+_RATE_MAX = 5
+_ATTEMPTS: dict[str, list[float]] = {}
 
 
 def _sms_entries(hass: HomeAssistant) -> list[ConfigEntry]:
@@ -46,16 +73,49 @@ def _sms_entries(hass: HomeAssistant) -> list[ConfigEntry]:
     ]
 
 
+def _entry_secret(entry: ConfigEntry) -> str:
+    return str(
+        entry.options.get(CONF_WEBHOOK_SECRET)
+        or entry.data.get(CONF_WEBHOOK_SECRET)
+        or ""
+    )
+
+
+def _is_local(request: Request) -> bool:
+    """请求是否来自内网/回环（未配置密钥时的最低门槛）。"""
+    remote = request.remote
+    if not remote:
+        return False
+    try:
+        addr = ipaddress.ip_address(remote)
+    except ValueError:
+        return False
+    return addr.is_private or addr.is_loopback
+
+
+def _rate_limited(key: str) -> bool:
+    now = time.monotonic()
+    history = [t for t in _ATTEMPTS.get(key, []) if now - t < _RATE_WINDOW]
+    if len(history) >= _RATE_MAX:
+        _ATTEMPTS[key] = history
+        return True
+    history.append(now)
+    _ATTEMPTS[key] = history
+    return False
+
+
+def _sms_state(hass: HomeAssistant, phone: str) -> dict[str, Any]:
+    return hass.data.get(DATA_SMS_STATE, {}).get(phone) or {}
+
+
 async def _relogin(hass: HomeAssistant, entry: ConfigEntry, code: str) -> dict:
     """Build a throw-away client from entry data, submit the code, persist, reload."""
     data = dict(entry.data)
-    from .net import build_connector
-
     session = aiohttp.ClientSession(connector=build_connector(legacy_tls=True))
     try:
         if data.get("carrier") == CARRIER_TELECOM:
             client = TelecomClient(session, data)
-            saved = hass.data.get(DOMAIN, {}).get("sms_state", {}).get(data.get("phone", ""))
+            saved = _sms_state(hass, data.get("phone", ""))
             if saved:
                 client.import_sms_state(saved)
             creds = await client.async_login_sms_submit(code)
@@ -66,8 +126,13 @@ async def _relogin(hass: HomeAssistant, entry: ConfigEntry, code: str) -> dict:
             }
         else:
             client = UnicomClient(session, data)
+            # 联通 radomLogin 校验发码时的 deviceId，缺了会被判风控
+            saved = _sms_state(hass, data.get("phone", ""))
+            if saved:
+                client.import_sms_state(saved)
             creds = await client.async_sms_login(code)
-            updates = {"token": creds["token"]}
+            updates = {"token": creds["token"], "app_id": creds.get("app_id", "")}
+            updates = {k: v for k, v in updates.items() if v}
     finally:
         await session.close()
     hass.config_entries.async_update_entry(entry, data={**data, **updates})
@@ -87,17 +152,11 @@ async def async_handle_webhook(
 
     code = str(payload["code"]).strip()
     phone = str(payload["phone"]).strip()
-    # 可选共享密钥：条目 options/data 设置 webhook_secret 后，请求必须带
-    # 同值 X-Secret 头（或 body.secret）
-    provided_secret = str(request.headers.get("X-Secret") or payload.get("secret") or "")
+    provided_secret = str(
+        request.headers.get("X-Secret") or payload.get("secret") or ""
+    )
+
     candidates = _sms_entries(hass)
-    if phone:
-        candidates = [e for e in candidates if e.data.get("phone") == phone]
-    if candidates:
-        expected = (candidates[0].options.get("webhook_secret")
-                    or candidates[0].data.get("webhook_secret") or "")
-        if expected and provided_secret != expected:
-            return webhook.json_response({"ok": False, "error": "bad_secret"}, status=403)
     if phone:
         candidates = [e for e in candidates if e.data.get("phone") == phone]
     if not candidates:
@@ -109,11 +168,29 @@ async def async_handle_webhook(
         )
 
     entry = candidates[0]
+    expected = _entry_secret(entry)
+    if expected:
+        if not hmac.compare_digest(provided_secret, expected):
+            return webhook.json_response({"ok": False, "error": "bad_secret"}, status=403)
+    elif not _is_local(request):
+        # 未配密钥 + 来自公网：直接拒绝（验证码是账号登录凭据）
+        _LOGGER.warning(
+            "短信 webhook 拒绝公网请求（未配置 webhook_secret）: remote=%s",
+            request.remote,
+        )
+        return webhook.json_response(
+            {"ok": False, "error": "secret_required"}, status=403
+        )
+
+    if _rate_limited(phone or entry.entry_id):
+        _LOGGER.warning("短信 webhook 触发限频: %s", entry.title)
+        return webhook.json_response({"ok": False, "error": "rate_limited"}, status=429)
+
     try:
         updates = await _relogin(hass, entry, code)
-    except Exception as err:  # noqa: BLE001
+    except Exception as err:  # noqa: BLE001 - 对外只给分类，细节进日志
         _LOGGER.warning("短信自动重登失败: %s", err)
-        return webhook.json_response({"ok": False, "error": str(err)[:160]}, status=500)
+        return webhook.json_response({"ok": False, "error": "relogin_failed"}, status=500)
     _LOGGER.info("短信 webhook 重登成功: %s", entry.title)
     return webhook.json_response({"ok": True, "account": entry.title,
                                   "updated": sorted(updates)})
@@ -127,4 +204,7 @@ def async_register(hass: HomeAssistant) -> None:
         WEBHOOK_ID,
         async_handle_webhook,
         allowed_methods=["POST"],
+        # 不能设 local_only=True：短信转发器常从蜂窝网络（公网）回传。
+        # 公网暴露由「密钥 or 内网来源」二选一兜底，见 async_handle_webhook。
+        local_only=False,
     )

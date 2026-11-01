@@ -73,6 +73,7 @@ def empty_data(carrier: str, phone: str) -> dict[str, Any]:
         "pay_type": None,     # 付费类型（预付费/后付费）
         "special_balance": None,  # 专用余额（元）
         "phone_region": None,     # 归属地完整（省+市）
+        "account_status": None,   # 账户状态（正常在网 / 欠费 / 停机）
         "points": None,
         "flow_general": None,  # {"used": GB, "total": GB, "remain": GB}
         "flow_directed": None,
@@ -164,6 +165,12 @@ class CarrierClient:
                 if resp.status >= 400:
                     _LOGGER.debug("%s HTTP %s: %s", url, resp.status, body[:200])
                 return resp.status, body
+        except aiohttp.ClientSSLError as err:
+            # 证书校验失败是配置/环境问题，不该被当成"运营商改协议"反复重试
+            raise CarrierError(
+                f"TLS 校验失败: {err}（若为运营商自签证书，可临时设置 "
+                "CN_CARRIER_INSECURE_TLS=1，但会失去 MITM 防护）"
+            ) from err
         except aiohttp.ClientError as err:
             raise CarrierError(f"网络错误: {err}") from err
         except TimeoutError as err:
