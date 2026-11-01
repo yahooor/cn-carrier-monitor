@@ -45,19 +45,8 @@ async def async_setup_entry(
 
     @callback
     def _sync() -> None:
-        from homeassistant.helpers import entity_registry as er_mod
-        registry = er_mod.async_get(hass)
         desired = _desired_keys(coordinator.data or {})
-        new = []
-        for k in desired:
-            if k in created:
-                continue
-            uid = f"{entry.entry_id}_{k}"
-            # 跳过注册表中已有同 unique_id 的实体（防止重复添加报错）
-            if registry.async_get_entity_id("sensor", DOMAIN, uid) or                registry.async_get_entity_id("button", DOMAIN, uid):
-                created.add(k)
-                continue
-            new.append(k)
+        new = [k for k in desired if k not in created]
         if not new:
             return
         created.update(new)
@@ -68,7 +57,7 @@ async def async_setup_entry(
 
 
 def _desired_keys(data: dict[str, Any]) -> list[str]:
-    """根据最新数据决定应有实体（顺序即实体排序）。"""
+    """根据最新数据决定应有实体（顺序即实体排序，键必须唯一）。"""
     keys: list[str] = []
     if data.get("balance") is not None:
         keys.append("balance")
@@ -96,11 +85,6 @@ def _desired_keys(data: dict[str, Any]) -> list[str]:
         keys.append("sms_remain")
     if data.get("points") is not None:
         keys.append("points")
-    # 归属地
-    if data.get("location"):
-        keys.append("location")
-    if data.get("plan_price"):
-        keys.append("plan_price")
     # Round-3 新增
     if data.get("updated_at"):
         keys.append("last_update")
@@ -120,7 +104,8 @@ def _desired_keys(data: dict[str, Any]) -> list[str]:
         keys.append("phone_region")
     if data.get("account_status"):
         keys.append("account_status")
-    return keys
+    # 同一键只出现一次：重复项会生成两个同 unique_id 的实体
+    return list(dict.fromkeys(keys))
 
 
 ENTITY_FACTORY: dict[str, Any] = {}
@@ -351,15 +336,20 @@ class CarrierLastUpdateSensor(CarrierSensor):
 
     @property
     def native_value(self):
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime
+
+        from homeassistant.util import dt as dt_util
+
         raw = self._data.get("updated_at")
         if not raw:
             return None
         try:
             dt = datetime.strptime(str(raw), "%Y-%m-%d %H:%M:%S")
-            return dt.replace(tzinfo=timezone(timedelta(hours=8)))
         except (ValueError, TypeError):
             return None
+        # 采集端存的是 HA 主机本地时间，按 HA 配置时区解释（原先硬编码 +8，
+        # 非东八区部署会整体偏移 8 小时）
+        return dt.replace(tzinfo=dt_util.get_default_time_zone())
 
 
 @_register("star_level")

@@ -9,3 +9,42 @@ refresh:
       required: false
       selector:
         text:
+
+inject_token:
+  name: 注入会话凭证
+  description: >-
+    运维用：把浏览器收割到的 token / Cookie 直接写入指定号码的配置条目并重载。
+    适用于广电 cURL 导入、移动 72 小时重新登录等需要人工换会话的场景。
+  fields:
+    phone:
+      name: 手机号
+      description: 目标账号的手机号（需与已有条目一致）。
+      example: "19974410126"
+      required: true
+      selector:
+        text:
+    token:
+      name: Token
+      description: 电信 / 联通可用的登录 token。
+      required: false
+      selector:
+        text:
+    cookies:
+      name: Cookie
+      description: 浏览器里复制的 Cookie 请求头（移动 / 联通 / 广电）。
+      required: false
+      selector:
+        text:
+          multiline: true
+    province_code:
+      name: 省份编码
+      description: 电信专用，可选。
+      required: false
+      selector:
+        text:
+    city_code:
+      name: 地市编码
+      description: 电信专用，可选。
+      required: false
+      selector:
+        text:

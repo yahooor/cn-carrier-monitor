@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import os
 
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
@@ -15,24 +16,42 @@ from homeassistant.helpers import config_validation as cv
 
 from .const import DOMAIN, PLATFORMS, SERVICE_REFRESH
 from .coordinator import CarrierDataUpdateCoordinator
+from .net import warm_ssl_context
 
 _LOGGER = logging.getLogger(__name__)
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
-REFRESH_SCHEMA = vol.Schema({vol.Optional("entry_id"): str})
+REFRESH_SCHEMA = vol.Schema({vol.Optional("entry_id"): cv.string})
+
+INJECT_SCHEMA = vol.Schema(
+    {
+        vol.Required("phone"): cv.string,
+        vol.Optional("token"): cv.string,
+        vol.Optional("cookies"): cv.string,
+        vol.Optional("province_code"): cv.string,
+        vol.Optional("city_code"): cv.string,
+    }
+)
 
 
 async def async_setup(hass: HomeAssistant, config) -> bool:
     """Register integration-level services."""
 
+    # SSL 上下文预热：load_default_certs() 是阻塞调用，必须放到 executor
+    await hass.async_add_executor_job(warm_ssl_context)
+
     async def async_refresh(call: ServiceCall) -> None:
         entry_id = call.data.get("entry_id")
-        coordinators = hass.data.get(DOMAIN, {})
-        for unique_entry_id, coordinator in coordinators.items():
-            if entry_id and unique_entry_id != entry_id:
-                continue
-            hass.async_create_task(coordinator.async_request_refresh())
+        coordinators = _coordinators(hass)
+        if entry_id:
+            coordinator = coordinators.get(entry_id)
+            if coordinator is None:
+                raise HomeAssistantError(f"未找到 entry_id={entry_id} 的账号")
+            await coordinator.async_request_refresh()
+            return
+        for coordinator in coordinators.values():
+            await coordinator.async_request_refresh()
 
     hass.services.async_register(
         DOMAIN, SERVICE_REFRESH, async_refresh, schema=REFRESH_SCHEMA
@@ -54,28 +73,37 @@ async def async_setup(hass: HomeAssistant, config) -> bool:
         for entry in hass.config_entries.async_entries(DOMAIN):
             if entry.data.get("phone") == phone:
                 hass.config_entries.async_update_entry(entry, data={**entry.data, **updates})
+                _LOGGER.info("已注入会话凭证: %s（字段 %s）", entry.title, sorted(updates))
                 await hass.config_entries.async_reload(entry.entry_id)
                 return
         raise HomeAssistantError(f"未找到号码 {phone} 的条目")
 
     hass.services.async_register(
-        DOMAIN, "inject_token", async_inject_token,
-        schema=vol.Schema({
-            vol.Required("phone"): str,
-            vol.Optional("token"): str,
-            vol.Optional("cookies"): str,
-            vol.Optional("province_code"): str,
-            vol.Optional("city_code"): str,
-        }),
+        DOMAIN, "inject_token", async_inject_token, schema=INJECT_SCHEMA
     )
+
     from . import webhook as _webhook
 
     _webhook.async_register(hass)
 
     # 集成图标（brands PR 合并前的前端覆盖方案）
-    _register_frontend_assets(hass)
+    # 用 try/except 保护——图标注册失败不应阻止集成加载
+    try:
+        await _async_register_frontend_assets(hass)
+    except Exception as err:  # noqa: BLE001 - 纯展示层，失败不影响功能
+        _LOGGER.warning("前端图标资源注册失败（不影响功能）: %s", err)
 
     return True
+
+
+def _coordinators(hass: HomeAssistant) -> dict[str, CarrierDataUpdateCoordinator]:
+    """只取真正的 coordinator，避免历史遗留的杂项键混进遍历。"""
+    raw = hass.data.get(DOMAIN, {})
+    return {
+        key: value
+        for key, value in raw.items()
+        if isinstance(value, CarrierDataUpdateCoordinator)
+    }
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -84,44 +112,72 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator = CarrierDataUpdateCoordinator(hass, entry)
     try:
         await coordinator.async_config_entry_first_refresh()
-    except Exception as err:  # noqa: BLE001
-        # 首拉失败仍创建实体（unavailable）：电信短信 token 短效等场景
-        # 靠后续轮询/重认证恢复，而不是整条卸载（Pocket-Carrier 同策略）
-        _LOGGER.warning("%s 首次拉取失败，实体将以不可用状态创建: %s", entry.title, err)
+    except Exception:
+        # 首次拉取失败：交给 HA 的标准机制（AuthFailed→reauth / NotReady→退避重试），
+        # 但必须先把会话关掉，否则每次重试都会漏一个 ClientSession。
+        await coordinator.async_shutdown()
+        raise
+
     hass.data[DOMAIN][entry.entry_id] = coordinator
+    # 选项（轮询间隔 / webhook 密钥）变更后重载；凭证滑动续期只改 data，
+    # 不会触发重载，否则每次轮询都会重载条目形成死循环。
+    entry.async_on_unload(entry.add_update_listener(_async_entry_updated))
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
+
+
+async def _async_entry_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    coordinator = _coordinators(hass).get(entry.entry_id)
+    if coordinator is None:
+        return
+    if dict(entry.options) == coordinator.options_snapshot:
+        return
+    coordinator.options_snapshot = dict(entry.options)
+    _LOGGER.debug("%s 选项已变更，重载条目", entry.title)
+    await hass.config_entries.async_reload(entry.entry_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     coordinator = hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
-    if coordinator:
+    if isinstance(coordinator, CarrierDataUpdateCoordinator):
         await coordinator.async_shutdown()
     return unload_ok
 
-def _register_frontend_assets(hass):
+
+async def _async_register_frontend_assets(hass: HomeAssistant) -> None:
     """注册集成前端资源（图标覆盖 JS + 静态图片）。"""
-    import os
-
     integration_path = os.path.dirname(__file__)
-
-    # JS 覆盖模块（拦截 brands 404 图标）
     js_path = os.path.join(integration_path, "js", "icon_override.js")
-    if os.path.exists(js_path):
-        url = f"/api/custom_components/{DOMAIN}/js/icon_override.js"
-        hass.http.register_static_path(
-            url, js_path, cache_headers=False
-        )
-        # 注册为额外前端模块（HA 会自动加载）
-        hass.data.setdefault("frontend_extra_module_url", set())
-        hass.data["frontend_extra_module_url"].add(url)
-
-    # 静态图片（icon/logo PNG/SVG）
     img_dir = os.path.join(integration_path, "images")
+
+    paths: list[tuple[str, str, bool]] = []
+    js_url = f"/api/custom_components/{DOMAIN}/js/icon_override.js"
+    if os.path.exists(js_path):
+        paths.append((js_url, js_path, False))
     if os.path.isdir(img_dir):
-        hass.http.register_static_path(
-            f"/api/custom_components/{DOMAIN}/images", img_dir,
-            cache_headers=True
+        paths.append((f"/api/custom_components/{DOMAIN}/images", img_dir, True))
+    if not paths:
+        return
+
+    try:
+        # HA 2024.7+ 的新 API；旧版本回退到 register_static_path
+        from homeassistant.components.http import StaticPathConfig
+
+        await hass.http.async_register_static_paths(
+            [StaticPathConfig(url, path, cache) for url, path, cache in paths]
         )
+    except ImportError:
+        for url, path, cache in paths:
+            hass.http.register_static_path(url, path, cache_headers=cache)
+
+    # 注入前端模块（图标覆盖）。add_extra_js_url 需要 frontend 已加载，
+    # 未启用前端时静默跳过。
+    if any(url == js_url for url, _path, _cache in paths):
+        try:
+            from homeassistant.components.frontend import add_extra_js_url
+
+            add_extra_js_url(hass, js_url)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("前端模块注入跳过: %s", err)

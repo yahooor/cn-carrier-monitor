@@ -87,5 +87,9 @@ async def async_get_config_entry_diagnostics(
                 if coordinator.update_interval
                 else None
             ),
+            # 最近一次失败的分类/摘要（不含凭证），排障时比翻日志快
+            "last_error": getattr(coordinator, "last_error", None),
+            "fail_streak": getattr(coordinator, "_fail_streak", 0),
+            "auth_fail_streak": getattr(coordinator, "_auth_fail_streak", 0),
         }
     return diagnostics

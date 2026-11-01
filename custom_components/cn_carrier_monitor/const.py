@@ -133,3 +133,8 @@ ATTR_CARRIER = "carrier"
 
 SERVICE_REFRESH = "refresh"
 CONF_WEBHOOK_SECRET = "webhook_secret"
+
+# hass.data 命名空间：短信发码会话状态单独占一个顶层键。
+# 早期版本把它塞进 hass.data[DOMAIN]（该字典以 entry_id 为键存 coordinator），
+# 导致 refresh 服务遍历时把状态字典当 coordinator 调用而报错。
+DATA_SMS_STATE = f"{DOMAIN}_sms_state"

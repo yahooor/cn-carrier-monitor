@@ -56,6 +56,7 @@ from .const import (
     CONF_PHONE,
     CONF_PROVINCE_CODE,
     CONF_TOKEN,
+    DATA_SMS_STATE,
     DEFAULT_INTERVAL,
     DOMAIN,
 )
@@ -64,6 +65,12 @@ from .net import build_connector
 _LOGGER = logging.getLogger(__name__)
 
 PHONE_RE = r"^1[3-9]\d{9}$"
+
+# HA 2025.8 起 OptionsFlowWithConfigEntry 被标记弃用，后续版本会移除；
+# 条件基类让同一份代码在新旧 HA 上都能实例化。
+_OptionsFlowBase = getattr(
+    config_entries, "OptionsFlowWithConfigEntry", config_entries.OptionsFlow
+)
 
 
 def _phone_schema(default: str = "") -> dict:
@@ -137,9 +144,9 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 finally:
                     await session.close()
                 if sent:
-                    self.hass.data.setdefault(DOMAIN, {}).setdefault(
-                        "sms_state", {}
-                    )[entry.data[CONF_PHONE]] = client.export_sms_state()
+                    self._store_sms_state(
+                        entry.data[CONF_PHONE], client.export_sms_state()
+                    )
                     return await self.async_step_telecom_sms_code()
             route = {
                 (CARRIER_TELECOM, AUTH_TELECOM_PASSWORD): "telecom",
@@ -182,12 +189,28 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         await self.async_set_unique_id(unique_id)
         if self._reauth_entry is not None:
             self._abort_if_unique_id_mismatch()
-            self.hass.config_entries.async_update_entry(self._reauth_entry, data=data)
-            return self.async_abort(reason="reauth_successful")
+            # 合并旧条目数据：重新认证只换凭证，不该丢掉 webhook_secret /
+            # interval / 广电 request_url 这类与登录无关的配置
+            merged = {**self._reauth_entry.data, **data}
+            # async_update_reload_and_abort 会真正重载条目；早期用
+            # async_update_entry + async_abort，重认证完成后条目仍停留在
+            # 失败状态，必须重启 HA 才恢复
+            return self.async_update_reload_and_abort(
+                self._reauth_entry, data=merged, reason="reauth_successful"
+            )
         self._abort_if_unique_id_configured()
         return self.async_create_entry(
             title=_entry_title(data[CONF_CARRIER], data.get(CONF_PHONE, "")), data=data
         )
+
+    def _store_sms_state(self, phone: str, state: dict) -> None:
+        """保存发码会话状态（uid/key/isct、device_id），供输码步/转发器复用。"""
+        if not phone or not state:
+            return
+        self.hass.data.setdefault(DATA_SMS_STATE, {})[phone] = state
+
+    def _load_sms_state(self, phone: str) -> dict:
+        return self.hass.data.get(DATA_SMS_STATE, {}).get(phone) or {}
 
     # ------------------------------------------------------------------ telecom
 
@@ -278,9 +301,7 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             finally:
                 await session.close()
             if sent:
-                self.hass.data.setdefault(DOMAIN, {}).setdefault(
-                    "sms_state", {}
-                )[self._phone] = client.export_sms_state()
+                self._store_sms_state(self._phone, client.export_sms_state())
                 return await self.async_step_telecom_sms_code()
         return self.async_show_form(
             step_id="telecom_sms_phone",
@@ -298,9 +319,7 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data = {}
             try:
                 client = TelecomClient(session, {"phone": self._phone})
-                saved_state = (
-                    self.hass.data.get(DOMAIN, {}).get("sms_state", {}).get(self._phone)
-                )
+                saved_state = self._load_sms_state(self._phone)
                 if saved_state:
                     client.import_sms_state(saved_state)
                 creds = await client.async_login_sms_submit(code)
@@ -452,11 +471,11 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """联通短信登录：手机号 + （可选）H5 滑块 resultToken。"""
         errors = {}
         placeholders = {}
+        hint = ""
         if user_input is not None:
             self._phone = user_input[CONF_PHONE]
             result_token = user_input.get("result_token", "").strip()
             session = aiohttp.ClientSession(connector=build_connector(legacy_tls=True))
-            hint = ""
             try:
                 client = UnicomClient(session, {"phone": self._phone})
                 if result_token:
@@ -464,13 +483,17 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     hint = "短信验证码已下发，请查收后继续"
                 else:
                     hint = await client.async_sms_trigger()
-                return await self.async_step_unicom_sms_code(hint)
+                # 发码用的 deviceId/appId 必须带到输码步：radomLogin 会校验
+                # 设备一致性，换设备号提交会被判为风控而"验证码错误"
+                self._store_sms_state(self._phone, client.export_sms_state())
             except CarrierError as err:
                 errors["base"] = "unicom_sms_send_failed"
                 placeholders["reason"] = getattr(err, "detail", "") or str(err)[:120]
                 _LOGGER.warning("联通短信下发失败: %s", err)
             finally:
                 await session.close()
+            if not errors:
+                return await self.async_step_unicom_sms_code(hint)
         placeholders.setdefault("reason", "")
         placeholders.setdefault("url", "m.client.10010.com/login-web")
         return self.async_show_form(
@@ -494,6 +517,9 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data = {}
             try:
                 client = UnicomClient(session, {"phone": self._phone})
+                saved = self._load_sms_state(self._phone)
+                if saved:
+                    client.import_sms_state(saved)
                 creds = await client.async_sms_login(code)
                 data = {
                     CONF_CARRIER: CARRIER_UNICOM,
@@ -599,6 +625,8 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     await async_send_sms_code(self._session(), self._phone)
                 except CarrierError as err:
                     _LOGGER.info("移动服务端代发未成功（改为用户侧取码）: %s", err)
+                # 只尝试一次：表单重渲染不应重复触发发码（风控限频）
+                self._sms_sent = True
             return await self.async_step_mobile_sms_code()
         return self.async_show_form(
             step_id="mobile_sms",
@@ -800,17 +828,35 @@ class ChinaCarrierMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return ChinaCarrierMonitorOptionsFlow(config_entry)
 
 
-class ChinaCarrierMonitorOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
-    """Options: refresh interval."""
+class ChinaCarrierMonitorOptionsFlow(_OptionsFlowBase):
+    """Options: refresh interval + webhook secret."""
+
+    def __init__(self, entry=None) -> None:
+        # 兼容两种基类：旧版 OptionsFlowWithConfigEntry 接收 entry；
+        # 新版 OptionsFlow 的 config_entry 由 flow manager 注入
+        if _OptionsFlowBase is config_entries.OptionsFlow:
+            super().__init__()
+            self._entry = entry
+        else:
+            super().__init__(entry)
+
+    @property
+    def _target_entry(self) -> config_entries.ConfigEntry | None:
+        try:
+            entry = self.config_entry
+        except Exception:  # noqa: BLE001 - 旧/新基类取法不同，取不到就回退
+            entry = None
+        return entry or getattr(self, "_entry", None)
 
     async def async_step_init(self, user_input=None):
+        entry = self._target_entry
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
-        current = self.config_entry.options.get(
+        current = entry.options.get(
             CONF_INTERVAL,
-            self.config_entry.data.get(CONF_INTERVAL, DEFAULT_INTERVAL),
+            entry.data.get(CONF_INTERVAL, DEFAULT_INTERVAL),
         )
-        current_secret = self.config_entry.options.get("webhook_secret", "")
+        current_secret = entry.options.get("webhook_secret", "")
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema({
