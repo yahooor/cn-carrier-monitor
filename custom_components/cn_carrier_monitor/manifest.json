@@ -6,7 +6,11 @@
   ],
   "config_flow": true,
   "dependencies": [
+    "http",
     "persistent_notification"
+  ],
+  "after_dependencies": [
+    "frontend"
   ],
   "documentation": "https://github.com/yahooor/cn-carrier-monitor",
   "integration_type": "hub",
