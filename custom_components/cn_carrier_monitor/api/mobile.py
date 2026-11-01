@@ -916,6 +916,38 @@ class MobileClient(CarrierClient):
                 extra_headers=uni_headers),
         )
 
+        # 全部传输失败 + 配了代理 = 疑似代理出口切换（d.sid 与新出口 IP 不匹配）。
+        # 立即重跑一次自愈（newHome 重签 d.sid=新出口）再补一轮查询——
+        # 把节点漂移的不可用窗口从 30-60 分钟压到本轮内。
+        # 无代理（直连）时不重试：直连出口稳定，重试徒增风控暴露。
+        if failures and len(failures) >= 4 and getattr(self, "_proxy", None) and not data.get(
+            "extra", {}
+        ).get("endpoint_anomalies"):
+            _LOGGER.info(
+                "移动网厅端点全部失败且配置了代理：疑似出口切换，重签 d.sid 后重试一轮"
+            )
+            uni_headers = await self._prepare_uni_headers()
+            anomalies.clear()
+            failures.clear()
+            _apply(MOBILE_PLAN_URL, _apply_plan, await _query(MOBILE_PLAN_URL))
+            _apply(
+                MOBILE_FEE_URL_V2, _apply_fee,
+                await _query(MOBILE_FEE_URL_V2))
+            _apply(
+                MOBILE_MARGIN_URL_V2, _apply_margin,
+                await _query(
+                    MOBILE_MARGIN_URL_V2, method="POST",
+                    json_body={"operation": "getCustomerKeyMessage"},
+                    extra_headers=uni_headers),
+            )
+            _apply(
+                MOBILE_MARGIN_QRY_URL_V2, _apply_margin_query,
+                await _query(
+                    MOBILE_MARGIN_QRY_URL_V2, method="POST",
+                    json_body={"operation": "getCustomerKeyMessage"},
+                    extra_headers=uni_headers),
+            )
+
         if anomalies:
             # 落进 extra：事件日志的 extra_keys / diagnostics 能直接看到哪个端点漂移
             data["extra"]["endpoint_anomalies"] = anomalies

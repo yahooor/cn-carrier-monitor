@@ -547,3 +547,86 @@ def test_coordinator_merges_options_into_client_data(ha):
 
     src = Path(ha.coordinator.__file__).read_text(encoding="utf-8")
     assert "**dict(entry.options)" in src, "client data 未合并 options"
+
+
+# ---------------------------------------------------------------- 代理出口切换自愈重试
+
+
+async def test_proxy_exit_switch_triggers_reheal_retry(ha, monkeypatch):
+    """配了代理 + 全端点失败 → 触发一轮 newHome 重签重试（节点漂移自恢复）。"""
+    import importlib
+
+    importlib.import_module("ccm_ha.api.mobile")
+    from ccm_ha.api.base import CarrierError
+
+    client = _mobile_client_from(ha)
+    client._proxy = "http://10.0.0.1:7890"
+    calls = {"prep": 0, "q": 0}
+    results = iter([
+        {"object": {"resultData": {"curPlanName": "X"}}},
+        {"data": {"realFeeQryRsp": {"curFeeTotal": "9.9"}}},
+        {"data": {"resultData": {}}},
+        {"data": {"resultData": {}}},
+    ])
+    state = {"round": 0}
+
+    async def _prep():
+        calls["prep"] += 1
+        if calls["prep"] >= 2:
+            state["round"] = 1
+        return {"csrf-token": "t"}
+
+    async def _q(url, **kw):
+        calls["q"] += 1
+        if state["round"] == 0:
+            raise CarrierError(f"网络错误: {url} HTTP 502")
+        return next(results)
+
+    client._prepare_uni_headers = _prep
+    client._wx_query = _q
+
+    data = {"extra": {}}
+    await client._wx_fetch(data)
+    assert calls["prep"] == 2, f"应重签一次（prep={calls['prep']}）"
+    assert calls["q"] == 9, f"5 失败 + 4 重试（q={calls['q']}）"
+    assert not data["extra"].get("endpoint_failures"), (
+        f"重试成功后 failures 应清空: {data['extra'].get('endpoint_failures')}"
+    )
+
+
+def _mobile_client_from(ha):
+
+    mobile = __import__("ccm_ha.api.mobile", fromlist=["MobileClient"])
+    client = mobile.MobileClient.__new__(mobile.MobileClient)
+    client._data = {"phone": PHONE}
+    client._mode = "cookie"
+    client._password = ""
+    client._cookie = "uuid=x; d.sid=y"
+    client._device_id = "dev"
+    client._session = None
+    client._prov = "451"
+    client._city = "0459"
+    return client
+
+
+async def test_no_proxy_no_retry(ha, monkeypatch):
+    """未配代理（直连）时不重试——避免徒增风控暴露。"""
+    from ccm_ha.api.base import CarrierError
+
+    client = _mobile_client_from(ha)
+    client._proxy = None
+    calls = {"prep": 0}
+
+    async def _prep():
+        calls["prep"] += 1
+        return {}
+
+    async def _query(url, **kw):
+        raise CarrierError(f"网络错误: {url} HTTP 502")
+
+    monkeypatch.setattr(client, "_prepare_uni_headers", _prep)
+    monkeypatch.setattr(client, "_wx_query", _query)
+    data = {"extra": {}}
+    await client._wx_fetch(data)
+    assert calls["prep"] == 1, "无代理不应触发重签重试"
+    assert len(data["extra"].get("endpoint_failures", [])) == 5
