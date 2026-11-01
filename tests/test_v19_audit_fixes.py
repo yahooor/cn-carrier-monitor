@@ -366,3 +366,54 @@ async def _run_slider_guard(client):
     except RuntimeError:
         raise AssertionError("ZeroDivision 或其它崩溃逃逸")
     # 正常 return（重试耗尽放弃）也算通过
+
+
+# ---------------------------------------------------------------- 回归守卫
+
+
+def test_build_relogin_client_exists_for_sms_carriers(ha):
+    """回归守卫：_build_relogin_client 被误删会让自动发码静默失效。
+
+    async_send_relogin_sms（telecom/unicom 短信模式的自动发码）依赖它构造
+    临时客户端。删除 async_complete_sms_relogin 死方法时它曾被连带删除。
+    """
+    assert hasattr(ha.coordinator.CarrierDataUpdateCoordinator, "_build_relogin_client")
+
+
+async def test_async_send_relogin_sms_dispatches_by_carrier(ha):
+    """telecom → async_login_sms_send；unicom → async_sms_trigger；mobile → unsupported。"""
+    from ha_stub import ConfigEntry as CE, FakeHass as FH
+
+    for carrier, expect_sent in (("telecom", True), ("unicom", True), ("mobile", False)):
+        entry = CE(
+            f"e_{carrier}",
+            {"carrier": carrier, "phone": PHONE, "auth_mode": "sms"},
+            title=carrier,
+        )
+        coordinator = ha.coordinator.CarrierDataUpdateCoordinator(FH(), entry)
+        try:
+            if expect_sent:
+                called = []
+
+                def _make(name):
+                    async def _send():
+                        called.append(name)
+                        return True if name == "telecom" else "已下发验证码"
+
+                    return _send
+
+                import types
+
+                client = types.SimpleNamespace(
+                    async_login_sms_send=_make("telecom"),
+                    async_sms_trigger=_make("unicom"),
+                    export_sms_state=lambda: {"k": "v"},
+                )
+                coordinator._build_relogin_client = lambda: client
+                result = await coordinator.async_send_relogin_sms()
+                assert result == "sent", (carrier, result)
+                assert called, f"{carrier} 未调用发码方法"
+            else:
+                assert await coordinator.async_send_relogin_sms() == "unsupported"
+        finally:
+            await coordinator.async_shutdown()

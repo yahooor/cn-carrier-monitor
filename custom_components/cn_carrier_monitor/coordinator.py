@@ -403,6 +403,16 @@ class CarrierDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         step = min(max(self._auth_fail_streak - 1, 0), 4)
         return min(self.SMS_COOLDOWN_BASE * (2 ** step), self.SMS_COOLDOWN_MAX)
 
+    def _build_relogin_client(self):
+        """为自动发码构造临时客户端（telecom/unicom 短信模式专用）。"""
+        from .api import TelecomClient, UnicomClient
+
+        if self.carrier == "telecom":
+            return TelecomClient(self.session, dict(self.entry.data))
+        if self.carrier == "unicom":
+            return UnicomClient(self.session, dict(self.entry.data))
+        return None
+
     async def async_send_relogin_sms(self) -> str:
         """token 失效后自动下发登录短信（指数退避 + 单飞防并发发码）。"""
         async with self._relogin_lock:
