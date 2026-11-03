@@ -37,6 +37,16 @@
 
 把 `custom_components/cn_carrier_monitor` 整个目录复制到 HA 配置目录的 `custom_components/` 下，重启。
 
+## 本地开发
+
+```bash
+pip install -r requirements-dev.txt   # 测试与 lint 依赖
+pytest -q && ruff check .
+```
+
+AI 会话请先读 [AGENTS.md](AGENTS.md)——里面有手动部署方式、四运营商协议差异、
+测试文件按批次命名的查找技巧，以及「不要强行抽公共基类」的说明。
+
 ## 各运营商接入指南
 
 ### 中国电信（短信验证码 / 服务密码）
