@@ -15,7 +15,12 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .api import CarrierAuthError, CarrierError, create_client
+from .api import (
+    CarrierAuthError,
+    CarrierError,
+    CarrierMaintenanceError,
+    create_client,
+)
 from .const import CARRIER_LABELS, DEFAULT_INTERVAL, DOMAIN
 from .event_log import (
     EVENT_CIRCUIT_OPEN,
@@ -36,9 +41,19 @@ CREDENTIAL_PERSIST_INTERVAL = 600.0
 class CarrierDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Per-account coordinator: one config entry = one phone account."""
 
-    # 连续失败断路器：连续 >=5 次失败后熔断 15 分钟（保护运营商风控额度）
+    # 连续失败断路器：连续 >=5 次失败后熔断（保护运营商风控额度）
     FAILURE_THRESHOLD = 5
-    CIRCUIT_COOLDOWN = 900.0
+    # 熔断冷却的**下限**（秒）。实际取值见 `_circuit_cooldown()`：必须 >= 当前
+    # 轮询间隔，否则熔断分支永远进不去。
+    #
+    # 旧值 900s 是硬编码常数 < 轮询间隔 1800s，而 `_last_fail_at` 每轮失败
+    # 都会刷新 → 条件 `time.time() - self._last_fail_at < CIRCUIT_COOLDOWN`
+    # 恒为假 → 熔断（唯一会 return 而非 raise、从而能通知 listener 的分支）
+    # 形同虚设。实测移动账号连续失败 75 次一次都没进过熔断。
+    CIRCUIT_COOLDOWN = 3600.0
+    # 运营商维护态的固定退避（秒）：维护通常持续数小时到数天，
+    # 每 30 分钟打一次必然失败的请求只会徒增风控暴露面。
+    MAINTENANCE_INTERVAL = 3 * 3600.0
     # 自动重登发码退避：首次 30 分钟，之后每次翻倍，上限 6 小时。
     # 早期固定 5 分钟冷却 = 一小时最多 12 条短信，既烧钱又必然触发运营商风控。
     SMS_COOLDOWN_BASE = 1800.0
@@ -68,6 +83,8 @@ class CarrierDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_fail_at = 0.0
         self._last_sms_sent_at = 0.0
         self._auth_fail_streak = 0
+        # 运营商维护态标志：维护期间凭据有效，既不重登也不计入熔断
+        self._maintenance = False
         self._last_persist_at = 0.0
         self._relogin_lock = asyncio.Lock()
         # 掉线一次性通知是否已发（恢复成功后清零，下一轮掉线可再提示）
@@ -91,10 +108,21 @@ class CarrierDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     # ------------------------------------------------------------------ update
 
+    def _circuit_cooldown(self) -> float:
+        """本次熔断的有效冷却秒数：至少覆盖一个轮询间隔。
+
+        为什么不能是固定常数：轮询间隔 = 用户配置 + 0-59s 随机抖动，用户还
+        可能把间隔改成 60 分钟甚至更长。固定 3600s 在间隔 3617s 时仍然不够
+        —— 熔断分支要求 `now - _last_fail_at < cooldown`，而 `_last_fail_at`
+        每轮失败都刷新，所以冷却必须**严格大于**轮询间隔才可能命中。
+        """
+        interval = self._base_interval.total_seconds()
+        return max(self.CIRCUIT_COOLDOWN, interval * 2)
+
     async def _async_update_data(self) -> dict[str, Any]:
         if (
             self._fail_streak >= self.FAILURE_THRESHOLD
-            and time.time() - self._last_fail_at < self.CIRCUIT_COOLDOWN
+            and time.time() - self._last_fail_at < self._circuit_cooldown()
         ):
             degraded = dict(self.data) if isinstance(self.data, dict) else {}
             extra = {
@@ -118,6 +146,34 @@ class CarrierDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         started = time.perf_counter()
         try:
             data = await self.client.async_fetch()
+        except CarrierMaintenanceError as err:
+            # 运营商系统升级/维护：凭据有效，重登、重签 d.sid、换 IP 都无效。
+            # 因此这里刻意**不**做以下任何一件事（2026-11-07 修正）：
+            #   - 不累加 _fail_streak（熔断针对可自愈故障，维护期熔断无意义）
+            #   - 不推高 _auth_fail_streak（否则退避因子被认证语义污染）
+            #   - 不触发 _notify_needs_human（弹「请重新登录」对维护是误导）
+            #   - 不触发自动重登发码（白烧短信费 + 加倍风控暴露）
+            #   - 不触发 ConfigEntryAuthFailed（不发 reauth 卡片）
+            # 实测维护期曾被误判成 auth_expired 15 次、network 278 次。
+            self.last_error = self._error_info(err)
+            self._last_fail_at = time.time()
+            self._maintenance = True
+            await self._emit_event(
+                EVENT_FAILURE,
+                err=err,
+                started=started,
+                fail_streak=self._fail_streak,
+            )
+            _LOGGER.info(
+                "%s 运营商维护中（凭据有效，等待恢复即可）: %s",
+                self.entry.title, err,
+            )
+            # 维护期用固定的长间隔（3 小时），避免每 30 分钟打一次必然失败的请求
+            self.update_interval = timedelta(seconds=self.MAINTENANCE_INTERVAL)
+            # 走 return 路径：HA 的成功分支会 `self.data = data` 并调用
+            # async_update_listeners()，实体属性（含 session_state=maintenance）
+            # 会自动刷新，无需额外通知（额外通知会造成两次写入与状态抖动）。
+            return self._degraded_snapshot(err, maintenance=True)
         except CarrierAuthError as err:
             self.last_error = self._error_info(err)
             self._auth_fail_streak += 1
@@ -159,12 +215,21 @@ class CarrierDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     **({"circuit_open": True} if circuit_open else {}),
                 }
                 return degraded
+            # 无历史数据 → 走 HA 标准 reauth 流程。HA 在这条路径上同样不会
+            # 调用 async_update_listeners()，所以显式通知一次，让 session_state
+            # 传感器能显示 needs_human 而不是停在旧的 healthy。
+            self._notify_failure_state()
             raise ConfigEntryAuthFailed(str(err)) from err
         except CarrierError as err:
             self.last_error = self._error_info(err)
             await self._emit_event(EVENT_FAILURE, err=err, started=started)
             self._fail_streak += 1
             self._last_fail_at = time.time()
+            # network 类失败同样要退避：原先只有认证失败才退避，network 一直
+            # 按 30 分钟硬打（实测维护期 38 小时打了 380+ 次必然失败的请求）。
+            self._apply_network_backoff()
+            # 失败也要让实体刷新状态（HA 只在成功路径通知 listener）
+            self._notify_failure_state()
             raise UpdateFailed(str(err)) from err
         except asyncio.CancelledError:
             raise
@@ -173,11 +238,14 @@ class CarrierDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             await self._emit_event(EVENT_FAILURE, err=err, started=started)
             self._fail_streak += 1
             self._last_fail_at = time.time()
+            self._apply_network_backoff()
+            self._notify_failure_state()
             _LOGGER.exception("%s 更新时出现未预期异常", self.entry.title)
             raise UpdateFailed(f"查询失败: {err}") from err
 
         self._fail_streak = 0
         self._auth_fail_streak = 0
+        self._maintenance = False
         self.last_error = None
         # 恢复成功 → 回到基准轮询间隔
         self.update_interval = self._base_interval
@@ -201,6 +269,58 @@ class CarrierDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "at": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
 
+    def _degraded_snapshot(
+        self, err: BaseException, *, maintenance: bool = False
+    ) -> dict[str, Any]:
+        """失败时保留旧数据的降级快照。
+
+        返回（而非抛异常）有两个作用：
+        1. 实体保留上次数值而不是整条卸载（"降级保实体"设计）；
+        2. **return 路径会触发 HA 的 listener 通知**——抛 UpdateFailed 不会。
+           这正是 session_state 传感器此前停更的根因（见 `_notify_failure_state`）。
+        """
+        degraded = dict(self.data) if isinstance(self.data, dict) else {}
+        extra: dict[str, Any] = dict(degraded.get("extra") or {})
+        extra["fail_streak"] = self._fail_streak
+        if maintenance:
+            extra["maintenance"] = True
+            extra["maintenance_error"] = str(err)[:120]
+        degraded["extra"] = extra
+        return degraded
+
+    def _notify_failure_state(self) -> None:
+        """失败后主动通知实体刷新状态。
+
+        HA 2026.10.4 `helpers/update_coordinator.py` 的 `_async_refresh` 尾部：
+
+        ```python
+        if not self.last_update_success and not previous_update_success:
+            return          # 连续失败（本次失败 + 上次也失败）→ 直接返回，不通知
+        if (self.always_update or ...):
+            self.async_update_listeners()
+        ```
+
+        即 HA 只在**状态跃迁**时通知 listener：首次失败（成功→失败）会通知一次，
+        此后的**连续失败全部被早退吞掉**——`always_update=True` 也救不了，因为
+        早退发生在 `always_update` 判断之前。
+
+        实测后果（2026-11-07）：HA 于 11-05 10:53 重启后，移动账号
+        session_state 传感器在首次失败那一刻写下 `fail_streak=1`（正是那次跃迁
+        通知），之后连续失败 75 次，传感器属性**始终停在 fail_streak=1**——
+        与协调器实际状态严重脱节，掉线告警自动化会拿到过期数据。
+
+        这里在失败路径显式调用 `async_update_listeners()`，让
+        `CarrierSessionStateSensor` 能重算 native_value 与 extra_state_attributes。
+        顺序要求：先置 `last_update_success = False`，否则
+        `CarrierSensor.available`（判据 `not last_update_success and not self._data`）
+        会用旧值算出 available=True，把本该 unavailable 的实体写成 unknown。
+        """
+        self.last_update_success = False
+        try:
+            self.async_update_listeners()
+        except Exception as err:  # noqa: BLE001 - 通知失败不影响更新流程
+            _LOGGER.debug("失败状态通知 listener 异常（忽略）: %s", err)
+
     # ------------------------------------------------------------------ 会话状态
 
     @property
@@ -217,12 +337,18 @@ class CarrierDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def session_state(self) -> str:
         """会话健康度（供 session_state 实体与诊断包使用）。
 
-        判定顺序即严重度：熔断 > 需人工 > 降级 > 正常。
+        判定顺序即严重度：熔断 > 需人工 > 降级 > 维护中 > 正常。
+
+        `maintenance`（2026-11-07 新增）：运营商整站升级维护。此时凭据有效、
+        不需要人处理，区别于"需要重新登录"——自动化据此可以既不弹告警，
+        也不把账号标记为异常。
         """
         if self._fail_streak >= self.FAILURE_THRESHOLD:
             return "circuit_open"
         if self._auth_fail_streak > 0:
             return "degraded" if self.data else "needs_human"
+        if self._maintenance:
+            return "maintenance"
         return "healthy"
 
     def _apply_adaptive_interval(self) -> None:
@@ -237,6 +363,26 @@ class CarrierDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         _LOGGER.debug(
             "%s 认证失败 %d 次，轮询间隔调整为 %s",
             self.entry.title, self._auth_fail_streak, self.update_interval,
+        )
+
+    def _apply_network_backoff(self) -> None:
+        """网络/传输类失败后拉长轮询间隔（2 倍起，封顶 6 小时）。
+
+        实测（2026-11-07）：移动账号因运营商维护连续失败 38 小时 380+ 次，
+        每次间隔仍是基准 30 分钟——因为退避原先只挂在认证失败分支上。
+        对"必然失败"的端点继续按 30 分钟硬打，只会徒增风控暴露面。
+
+        首次失败即 2 倍（而不是 1 倍）：网络类失败往往不是一次性的，
+        立刻退避比"下次再说"更省风控额度。
+
+        2 倍起步而不是 8 倍：网络故障通常是临时的，过度退避会让恢复变慢。
+        """
+        factor = min(2 ** max(self._fail_streak, 1), 4)
+        target = self._base_interval * factor
+        self.update_interval = min(target, timedelta(hours=6))
+        _LOGGER.debug(
+            "%s 网络类失败 %d 次，轮询间隔调整为 %s",
+            self.entry.title, self._fail_streak, self.update_interval,
         )
 
     # ------------------------------------------------------------------ 掉线通知

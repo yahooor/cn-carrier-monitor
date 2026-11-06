@@ -55,6 +55,88 @@ class ParseAnomalyError(CarrierError):
     """HTTP 200 but the response is structurally empty/unknown (protocol drift)."""
 
 
+class CarrierMaintenanceError(CarrierError):
+    """运营商侧维护/升级公告页（暂时性：凭据有效，重登无效，重试无用）。
+
+    2026-11-05 线上实测：中国移动 wx.10086.cn 整站系统升级期间，所有端点
+    （含 newHome 根路径）都返回同一张 HTML 公告页，HTTP 500 / 404 均可能。
+    这类响应既不是"端点下线"（永久，需要人改代码），也不是"网络故障"
+    （用户网络没问题），更不是"会话失效"（凭证完全有效）—— 单独归一类。
+    """
+
+    def __init__(self, message: str, detail: str | None = None) -> None:
+        super().__init__(message, detail)
+
+
+# 运营商维护/升级公告页的 HTML 特征（大小写不敏感）。
+_MAINTENANCE_HTML_MARKERS = ("<html", "<!doctype html", "<title", "<body")
+# 公告页正文/标题的中文特征词。实测有两种形态：
+#   形态 A（业务端点）：<title>升级公告</title> + "由于系统升级，部分功能暂无法提供服务"
+#   形态 B（站点根路径）："为给您提供更优质的服务，我们正在进行系统优化升级。
+#                          升级期间将影响业务的查询和办理……敬请谅解"
+#
+# **强特征词**：单独出现即可判定为维护。这些词高度特异于公告页。
+_MAINTENANCE_TEXT_MARKERS = (
+    "升级公告",
+    "系统升级",
+    "系统优化升级",
+    "升级期间",
+    "维护升级",
+    "暂无法提供服务",
+    "正在玩命调试",
+)
+# **弱特征词**：通用礼貌语/错误页常用语，单独出现不足以判定为维护。
+# "稍后再试" / "敬请谅解" 在真实故障页、限流页里也常见；"系统维护" 在用户
+# 协议、帮助文档里也常见——若把它们当强特征，一次真实故障会被永久误判成
+# "维护中"，比原缺陷更难排查（用户看到的只是"运营商维护中"，永远不会去查
+# 真实原因）。
+_MAINTENANCE_WEAK_TEXT_MARKERS = (
+    "稍后再试",
+    "敬请谅解",
+    "请稍后",
+    "系统维护",
+)
+# 弱特征词需要搭配的上下文：必须同时在解释"为什么不可用"。
+# 刻意**不含**「维护」「升级」——因为「系统维护」本身就是弱特征词，若把
+# 「维护」列为上下文，"本协议涉及设备系统维护说明"会自命中（QA 实测过）。
+_MAINTENANCE_WEAK_CONTEXT_MARKERS = (
+    "系统优化",
+    "升级公告",
+    "正在升级",
+    "优化升级",
+    "暂停",
+    "不可用",
+    "暂时无法",
+    "稍后开放",
+)
+
+
+def is_maintenance_notice(body: str) -> bool:
+    """判断响应体是否为运营商维护/升级公告页。
+
+    判据是「HTML 页面 + 公告特征词」，**不看状态码**：同一个 404/500 既可能
+    是公告页（暂时性，运营商升级完自己恢复），也可能是真的端点下线或网关
+    故障（永久性/故障）。只看状态码会把维护误判成 protocol_drift（污染漂移率
+    统计）或 network（让用户以为网络坏了）。
+
+    特征词分强/弱两档：强特征词单独即可判定；弱特征词（"稍后再试"、
+    "敬请谅解"）必须同时出现上下文词（"升级"/"维护"/"优化"…），否则会把
+    真实故障页误判成维护。
+    """
+    if not body:
+        return False
+    lowered = body.lower()
+    if not any(mark in lowered for mark in _MAINTENANCE_HTML_MARKERS):
+        return False
+    if any(mark in body for mark in _MAINTENANCE_TEXT_MARKERS):
+        return True
+    if any(mark in body for mark in _MAINTENANCE_WEAK_TEXT_MARKERS) and any(
+        mark in body for mark in _MAINTENANCE_WEAK_CONTEXT_MARKERS
+    ):
+        return True
+    return False
+
+
 def empty_data(carrier: str, phone: str) -> dict[str, Any]:
     """Normalized snapshot returned by every carrier client."""
     return {

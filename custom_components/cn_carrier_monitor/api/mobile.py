@@ -48,8 +48,10 @@ from .base import (
     CarrierAuthError,
     CarrierClient,
     CarrierError,
+    CarrierMaintenanceError,
     ParseAnomalyError,
     finish,
+    is_maintenance_notice,
     parse_safe,
     to_float,
     usage_block,
@@ -628,6 +630,13 @@ class MobileClient(CarrierClient):
                 method, target, json_body=json_body, headers=headers
             )
         if status != 200:
+            # 维护公告页优先判定：运营商整站升级期间，状态码可能是 500 也可能是
+            # 404，两者都不能按"网络故障"或"端点下线"处理——凭据是好的，
+            # 等维护结束即可。实测 2026-11-02～11-07 连续 5 天命中此分支。
+            if is_maintenance_notice(body):
+                raise CarrierMaintenanceError(
+                    "移动网厅系统升级维护中（公告页），稍后重试"
+                )
             if status in (401, 403) or 300 <= status < 400:
                 # 网关用状态码表达"会话失效"：401/403，或 302 跳登录页
                 # （cookie 过期最常见的签名）。与 _native_request 的处理保持一致。
@@ -642,6 +651,12 @@ class MobileClient(CarrierClient):
             # return None：否则所有端点都非 200 时 failures/anomalies 都是空的，
             # async_fetch 会误判成"会话失效"，把用户引向填密码这个无效动作。
             raise CarrierError(f"网络错误: 移动网厅 {url} HTTP {status}")
+        # 状态码 200 也可能是公告页（站点根路径实测返回 200 + 公告），
+        # 必须先判公告再判登录态，否则维护会被误判成会话失效。
+        if is_maintenance_notice(body):
+            raise CarrierMaintenanceError(
+                "移动网厅系统升级维护中（公告页），稍后重试"
+            )
         text = decrypt_payload(body, WX_AES_KEY, WX_AES_IV)
         try:
             payload = json.loads(text)
@@ -743,6 +758,14 @@ class MobileClient(CarrierClient):
             extra = data.get("extra") or {}
             failures = extra.get("endpoint_failures") or []
             anomalies = extra.get("endpoint_anomalies") or []
+            maintenances = extra.get("endpoint_maintenances") or []
+            if maintenances:
+                # 运营商维护优先：凭据有效，重登/重签/换 IP 都无效。
+                # 归 auth_expired 会让集成弹「请重新登录」甚至自动发短信，
+                # 对维护完全是骚扰（实测维护期被误判成 auth_expired 15 次）。
+                raise CarrierMaintenanceError(
+                    f"移动网厅系统升级维护中，稍后重试: {maintenances[0][:120]}"
+                )
             if failures:
                 # 传输层全失败 → 网络问题
                 raise CarrierError(f"移动网厅端点全部请求失败: {failures[0][:140]}")
@@ -780,8 +803,14 @@ class MobileClient(CarrierClient):
 
         # 本轮收集到的端点级证据（最终落到 data["extra"]，便于诊断定位与判类）：
         # anomalies = 有响应但结构漂移（protocol_drift）；failures = 传输/业务失败
+        # maintenances = 运营商维护公告（凭据有效，等待即可）
         anomalies: list[str] = []
         failures: list[str] = []
+        maintenances: list[str] = []
+        # 本轮实际请求过的端点总数：自愈重试的阈值判定需要"整体不可用"，
+        # 只看 failures 的绝对数量会被 failures/anomalies 的分类切分误导
+        # （实测维护期 failures=2、anomalies=3，>=4 的旧阈值永不成立）。
+        attempted = 0
 
         def _record_anomaly(url: str, err: BaseException) -> None:
             """收敛单端点结构漂移：统一成带端点名的 ParseAnomalyError（protocol_drift）。"""
@@ -804,10 +833,17 @@ class MobileClient(CarrierClient):
             没有端点信息。转成带 URL 的 ParseAnomalyError 后是可定位的
             protocol_drift，并且只影响本端点。
             """
+            nonlocal attempted
+            attempted += 1
             try:
                 return await self._wx_query(url, **kwargs)
             except CarrierAuthError:
                 raise
+            except CarrierMaintenanceError as err:
+                # 运营商维护：凭据有效，不重试、不重签，等公告消失即可
+                _LOGGER.debug("移动网厅 %s 维护公告（忽略）: %s", url, err)
+                maintenances.append(f"{url}: {err}")
+                return None
             except ParseAnomalyError as err:
                 # 必须排在 CarrierError 之前：ParseAnomalyError ⊂ CarrierError，
                 # 否则 _wx_query 自己抛的解密失败/顶层结构未知永远进不了 anomalies，
@@ -916,13 +952,25 @@ class MobileClient(CarrierClient):
                 extra_headers=uni_headers),
         )
 
-        # 全部传输失败 + 配了代理 = 疑似代理出口切换（d.sid 与新出口 IP 不匹配）。
+        # 整体不可用 + 配了代理 = 疑似代理出口切换（d.sid 与新出口 IP 不匹配）。
         # 立即重跑一次自愈（newHome 重签 d.sid=新出口）再补一轮查询——
         # 把节点漂移的不可用窗口从 30-60 分钟压到本轮内。
-        # 无代理（直连）时不重试：直连出口稳定，重试徒增风控暴露。
-        if failures and len(failures) >= 4 and getattr(self, "_proxy", None) and not data.get(
-            "extra", {}
-        ).get("endpoint_anomalies"):
+        #
+        # 阈值语义（2026-11-07 修正）：判定的是"整体不可用"，而不是"failures
+        # 的绝对数量"。旧条件 `len(failures) >= 4 and not anomalies` 在真实故障
+        # 里永不成立——端点失败会被 failures/anomalies 分类切分（实测维护期
+        # failures=2、anomalies=3），结果 5 天 380+ 次失败里重试一次都没跑过。
+        # 现在按"失败端点 / 本轮尝试端点"的比例判定。
+        #
+        # 维护公告**不触发**重试：凭据是好的，重签 d.sid 毫无意义，只会加倍
+        # 风控暴露面。
+        total_failed = len(failures) + len(anomalies)
+        all_down = attempted > 0 and total_failed >= attempted
+        if (
+            all_down
+            and not maintenances
+            and getattr(self, "_proxy", None)
+        ):
             _LOGGER.info(
                 "移动网厅端点全部失败且配置了代理：疑似出口切换，重签 d.sid 后重试一轮"
             )
@@ -940,12 +988,20 @@ class MobileClient(CarrierClient):
                     json_body={"operation": "getCustomerKeyMessage"},
                     extra_headers=uni_headers),
             )
+            # 积分端点（score/news）是明文 JSON，不走 d.sid 绑定，重签无意义，
+            # 因此不纳入重试轮——重试的目的是刷新 d.sid，不是重跑所有端点。
             _apply(
                 MOBILE_MARGIN_QRY_URL_V2, _apply_margin_query,
                 await _query(
                     MOBILE_MARGIN_QRY_URL_V2, method="POST",
                     json_body={"operation": "getCustomerKeyMessage"},
                     extra_headers=uni_headers),
+            )
+        elif all_down:
+            _LOGGER.debug(
+                "移动网厅 %d/%d 端点失败，未达自愈重试条件（maintenance=%d, proxy=%s）",
+                total_failed, attempted, len(maintenances),
+                bool(getattr(self, "_proxy", None)),
             )
 
         if anomalies:
@@ -954,6 +1010,9 @@ class MobileClient(CarrierClient):
         if failures:
             # 同上：传输层失败的端点清单（async_fetch 用它区分 network 与 auth）
             data["extra"]["endpoint_failures"] = failures
+        if maintenances:
+            # 维护公告端点清单（async_fetch 用它识别维护态）
+            data["extra"]["endpoint_maintenances"] = maintenances
 
     @parse_safe
     def _parse_margin(self, payload: dict[str, Any], data: dict[str, Any]) -> None:

@@ -506,10 +506,14 @@ class CarrierAccountStatusSensor(CarrierSensor):
 
 @_register("session_state")
 class CarrierSessionStateSensor(CarrierSensor):
-    """会话健康度：healthy / degraded / needs_human / circuit_open。
+    """会话健康度：healthy / degraded / needs_human / circuit_open / maintenance。
 
     与其它实体不同，它**始终存在**（不受运营商返回字段影响），因此掉线时
     自动化可以直接用它告警，而不用去猜哪个数值实体变成了 unavailable。
+
+    `maintenance`（2026-11-07 新增）：运营商整站系统升级维护。此时凭据有效、
+    **不需要人处理**——自动化据此可以既不弹"重新登录"告警，也不把账号标记
+    为异常，只是暂时没有新数据。
     """
 
     _sensor_key = "session_state"

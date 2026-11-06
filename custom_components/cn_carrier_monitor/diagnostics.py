@@ -60,11 +60,18 @@ def _mask_phone(phone: str) -> str:
     return f"{phone[:3]}****{phone[7:]}" if len(phone) == 11 else phone
 
 
-def _summarize_events(path: str) -> dict[str, Any]:
+def _summarize_events(path: str, carrier: str | None = None) -> dict[str, Any]:
     """读事件日志尾部，输出失败分类计数与最近几条摘要。
 
     只统计 event/category 计数，不输出 phone 等原始字段（诊断包会随
     issue 外发，手机号与时序画像按威胁模型 R2 不落盘）。
+
+    Args:
+        path: 事件日志路径。
+        carrier: 只统计该运营商的事件；为 None 时统计全部。
+            **必须按 carrier 过滤**：多账号共用同一个事件日志文件，
+            不过滤时各账号下载到的 recent_events 完全相同（实测移动与联通
+            的诊断包 recent_events 逐条一致），排障时会指向错误的账号。
     """
     file = Path(path)
     if not file.exists():
@@ -85,6 +92,8 @@ def _summarize_events(path: str) -> dict[str, Any]:
         try:
             record = json.loads(line)
         except ValueError:
+            continue
+        if carrier and str(record.get("carrier") or "") != carrier:
             continue
         event = str(record.get("event") or "unknown")
         category = str(record.get("category") or "")
@@ -149,7 +158,9 @@ async def async_get_config_entry_diagnostics(
         # 事件日志摘要放 executor 读（diagnostics 是 async 上下文）
         try:
             diagnostics["recent_events"] = await hass.async_add_executor_job(
-                _summarize_events, hass.config.path(FILE_NAME)
+                _summarize_events,
+                hass.config.path(FILE_NAME),
+                entry.data.get("carrier"),
             )
         except Exception as err:  # noqa: BLE001 - 诊断信息缺失不应让下载失败
             _LOGGER.warning("读取事件日志摘要失败（忽略）: %s", err)

@@ -6,8 +6,10 @@ from .base import (  # noqa: F401
     CarrierAuthError,
     CarrierClient,
     CarrierError,
+    CarrierMaintenanceError,
     ParseAnomalyError,
     empty_data,
+    is_maintenance_notice,
 )
 from .broadnet import BroadnetClient
 from .mobile import MobileClient, async_send_sms_code
@@ -38,6 +40,7 @@ __all__ = [
     "CarrierAuthError",
     "CarrierClient",
     "CarrierError",
+    "CarrierMaintenanceError",
     "ParseAnomalyError",
     "BroadnetClient",
     "MobileClient",
@@ -48,4 +51,5 @@ __all__ = [
     "async_send_sms_code",
     "create_client",
     "empty_data",
+    "is_maintenance_notice",
 ]

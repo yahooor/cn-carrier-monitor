@@ -6,6 +6,8 @@
 - auth_expired:   CarrierAuthError（会话/凭证失效；风控子类除外）
 - rate_limit:     CarrierAuthError 且 detail 为 rate_limit:*（需滑块/操作频繁，
                   凭据有效、重登无效）
+- maintenance:    CarrierMaintenanceError（运营商系统升级/维护；凭据有效，
+                  等公告消失即可，重登与重签都无效）
 - protocol_drift: ParseAnomalyError（HTTP 200 但响应结构全空/未知/解密失败）
 - network:        连接/DNS/TLS/超时（aiohttp ClientError、TimeoutError、
                   客户端封装的"网络错误/请求超时"CarrierError）
@@ -35,6 +37,10 @@ CATEGORY_AUTH = "auth_expired"
 CATEGORY_DRIFT = "protocol_drift"
 CATEGORY_NETWORK = "network"
 CATEGORY_INTERNAL = "internal"
+# 运营商系统升级/维护（2026-11-07 新增）：凭据有效，等公告消失即可。
+# 独立成类是为了不把它算进 network（会让用户以为网络坏了）或
+# auth_expired（会弹「请重新登录」并自动发短信，对维护全是无效动作）。
+CATEGORY_MAINTENANCE = "maintenance"
 # 风控/频控（telecom 3005 需滑块 / 3007 操作频繁等）：凭据有效，重登无效
 CATEGORY_RATE_LIMIT = "rate_limit"
 
@@ -47,9 +53,18 @@ _NETWORK_MESSAGE_MARKS = ("网络错误", "请求超时")
 
 
 def classify_exception(err: BaseException) -> str:
-    """把更新异常归入失败四分类之一。"""
-    from .api.base import CarrierAuthError, CarrierError, ParseAnomalyError
+    """把更新异常归入失败分类之一。"""
+    from .api.base import (
+        CarrierAuthError,
+        CarrierError,
+        CarrierMaintenanceError,
+        ParseAnomalyError,
+    )
 
+    if isinstance(err, CarrierMaintenanceError):
+        # 必须在 CarrierAuthError 之前判断：维护期凭据是好的，归 auth_expired
+        # 会弹「请重新登录」并触发自动发短信，对维护全是无效动作。
+        return CATEGORY_MAINTENANCE
     if isinstance(err, CarrierAuthError):
         # 风控/频控子类（如电信 3005 需滑块 / 3007 操作频繁）：凭据本身有效，
         # 归 auth_expired 会把用户引向"重新登录"这个无效动作
